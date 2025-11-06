@@ -6,7 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import url from 'url';
 import bs58 from 'bs58';
-import FormData from 'form-data';
+// Use global fetch/FormData/Blob available in Node 18+
 import { Connection, Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction, SYSVAR_RENT_PUBKEY, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { tryHandleMarketRoute } from './marketplace.js';
 import { getDb } from './db.js';
@@ -210,10 +210,16 @@ function sendJson(res, code, obj) {
   res.end(body);
 }
 
-async function getParsedBody(req) {
+async function getParsedBody(req, limitBytes = 1_000_000) {
   return await new Promise((resolve, reject) => {
     let data = '';
-    req.on('data', (chunk) => { data += chunk; if (data.length > 1e6) req.destroy(); });
+    req.on('data', (chunk) => {
+      data += chunk;
+      if (data.length > limitBytes) {
+        try { req.destroy(); } catch {}
+        reject(new Error('request too large'));
+      }
+    });
     req.on('end', () => {
       try { resolve(data ? JSON.parse(data) : {}); } catch (e) { reject(e); }
     });
@@ -522,26 +528,32 @@ export async function handleRequest(req, res) {
     }
 
     if (pathname === '/api/pin/image' && req.method === 'POST') {
-      const body = await getParsedBody(req);
+      // Allow larger payload for base64 data (up to ~15MB)
+      const body = await getParsedBody(req, 15_000_000);
       const { filename, contentType, dataBase64, nameTag } = body || {};
       if (!process.env.PINATA_JWT) return sendJson(res, 400, { error: 'PINATA_JWT not configured' });
       if (!dataBase64) return sendJson(res, 400, { error: 'dataBase64 required' });
       const form = new FormData();
-      form.append('file', Buffer.from(dataBase64, 'base64'), { filename: filename || 'image', contentType: contentType || 'application/octet-stream' });
+      const blob = new Blob([Buffer.from(dataBase64, 'base64')], { type: contentType || 'application/octet-stream' });
+      form.append('file', blob, filename || 'image');
       form.append('pinataMetadata', JSON.stringify({ name: nameTag || filename || 'image' }));
       const r = await fetch('https://api.pinata.cloud/pinning/pinFileToIPFS', {
         method: 'POST',
         headers: { Authorization: `Bearer ${process.env.PINATA_JWT}` },
         body: form,
       });
-      if (!r.ok) return sendJson(res, 500, { error: `pinFile failed: ${r.status}` });
+      if (!r.ok) {
+        let bodyText = '';
+        try { bodyText = await r.text(); } catch {}
+        return sendJson(res, 500, { error: `pinFile failed: ${r.status}`, body: bodyText });
+      }
       const j = await r.json();
       const cid = j.IpfsHash;
       return sendJson(res, 200, { imageCid: cid, imageUri: `ipfs://${cid}`, gateway: `${process.env.PINATA_GATEWAY || 'https://gateway.pinata.cloud'}/ipfs/${cid}` });
     }
 
     if (pathname === '/api/pin/metadata' && req.method === 'POST') {
-      const body = await getParsedBody(req);
+      const body = await getParsedBody(req, 2_000_000);
       if (!process.env.PINATA_JWT) return sendJson(res, 400, { error: 'PINATA_JWT not configured' });
       const r = await fetch('https://api.pinata.cloud/pinning/pinJSONToIPFS', {
         method: 'POST',
