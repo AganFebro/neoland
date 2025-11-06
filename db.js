@@ -5,6 +5,7 @@
 import fs from 'fs';
 import { readFile, writeFile, rename, stat as fsStat } from 'fs/promises';
 import path from 'path';
+import { createClient } from '@supabase/supabase-js';
 
 // Allow overriding paths for serverless (e.g., use /tmp on Vercel)
 const DATA_JSON_PATH = path.resolve(process.env.DATA_JSON_PATH || './data.json');
@@ -188,6 +189,145 @@ class FileDB {
       });
     }
     return out;
+  }
+}
+
+// Supabase Postgres backend
+class SupabaseDB {
+  constructor({ url, key }) {
+    this.sb = createClient(url, key, { auth: { persistSession: false } });
+  }
+  async init() { /* assumes tables exist */ }
+  // Helpers to map DB row to our app shape
+  _mapColl(r, withArrays = false) {
+    const mapped = {
+      id: r.id,
+      owner: r.owner,
+      name: r.name,
+      symbol: r.symbol,
+      supply: Number(r.supply || 0),
+      priceLamports: Number(r.price_lamports || 0),
+      image_cid: r.image_cid || null,
+      image_gateway: r.image_gateway || null,
+      metadata_uri: r.metadata_uri || null,
+      metadata_gateway: r.metadata_gateway || null,
+      minted_count: Number(r.minted_count || 0),
+      created_at: Number(r.created_at || 0),
+    };
+    if (withArrays && r.mints && Array.isArray(r.mints)) {
+      mapped.mints = r.mints.slice();
+    }
+    return mapped;
+  }
+  async getCollections() {
+    const { data, error } = await this.sb
+      .from('collections')
+      .select('*')
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    return data.map((r) => this._mapColl(r));
+  }
+  async getCollectionById(id) {
+    const { data, error } = await this.sb
+      .from('collections')
+      .select('*')
+      .eq('id', id)
+      .single();
+    if (error) return null;
+    const coll = this._mapColl(data);
+    const { data: mints, error: err2 } = await this.sb
+      .from('mints')
+      .select('mint')
+      .eq('collection_id', id);
+    coll.mints = Array.isArray(mints) ? mints.map((x) => x.mint) : [];
+    return coll;
+  }
+  async createCollection({ name, symbol, supply, priceLamports, imageCid, metadataUri, metadataGateway, owner }) {
+    const id = randId();
+    const row = {
+      id,
+      owner,
+      name,
+      symbol,
+      supply: Number(supply || 0),
+      price_lamports: Number(priceLamports || 0),
+      image_cid: imageCid || null,
+      image_gateway: imageCid ? (process.env.PINATA_GATEWAY || 'https://gateway.pinata.cloud') + '/ipfs/' + imageCid : null,
+      metadata_uri: metadataUri,
+      metadata_gateway: metadataGateway || null,
+      minted_count: 0,
+      created_at: nowTs(),
+    };
+    const { error } = await this.sb.from('collections').insert(row);
+    if (error) throw error;
+    return id;
+  }
+  async getMintsForCollection(id) {
+    const { data: coll } = await this.sb.from('collections').select('image_gateway').eq('id', id).single();
+    const { data, error } = await this.sb
+      .from('mints')
+      .select('mint')
+      .eq('collection_id', id);
+    if (error) throw error;
+    return { mints: data.map((x) => x.mint), image_gateway: coll?.image_gateway || null };
+  }
+  async recordMint({ id, mint, minter = null, ts = nowTs() }) {
+    const tx = this.sb
+      .rpc('record_mint_and_inc', { p_collection_id: id, p_mint: mint, p_minter: minter, p_ts: Number(ts || nowTs()) });
+    // If RPC not installed, do it manually
+    const { error } = await tx;
+    if (error) {
+      // Fallback manual two-step
+      const { error: e1 } = await this.sb.from('mints').insert({ mint, collection_id: id, minter, ts: Number(ts || nowTs()) });
+      if (e1) throw e1;
+      const { error: e2 } = await this.sb.rpc('inc_minted_count', { p_id: id });
+      if (e2) {
+        // or just update directly
+        await this.sb.from('collections').update({ minted_count: (await this.getCollectionById(id))?.minted_count + 1 }).eq('id', id);
+      }
+    }
+    return true;
+  }
+  async getListings({ collectionId, seller, activeOnly = true }) {
+    let q = this.sb.from('market_listings').select('*');
+    if (collectionId) q = q.eq('collection_id', collectionId);
+    if (seller) q = q.eq('seller', seller);
+    if (activeOnly) q = q.is('cancelled', null).is('sold_at', null);
+    const { data, error } = await q.order('created_at', { ascending: false });
+    if (error) throw error;
+    return data.map((r) => ({ id: r.id, collectionId: r.collection_id, mint: r.mint, seller: r.seller, priceLamports: Number(r.price_lamports || 0), createdAt: Number(r.created_at || 0), cancelled: r.cancelled || null, soldAt: r.sold_at || null, buyer: r.buyer || null }));
+  }
+  async getListingById(id) {
+    const { data, error } = await this.sb.from('market_listings').select('*').eq('id', id).single();
+    if (error) return null;
+    return { id: data.id, collectionId: data.collection_id, mint: data.mint, seller: data.seller, priceLamports: Number(data.price_lamports || 0), createdAt: Number(data.created_at || 0), cancelled: data.cancelled || null, soldAt: data.sold_at || null, buyer: data.buyer || null };
+  }
+  async createListing({ mint, collectionId, seller, priceLamports }) {
+    const id = randId();
+    const createdAt = nowTs();
+    const row = { id, collection_id: collectionId, mint, seller, price_lamports: Number(priceLamports || 0), created_at: createdAt };
+    const { error } = await this.sb.from('market_listings').insert(row);
+    if (error) throw error;
+    return { id };
+  }
+  async cancelListing({ listingId }) {
+    const { error } = await this.sb.from('market_listings').update({ cancelled: nowTs() }).eq('id', listingId);
+    if (error) throw error;
+    return true;
+  }
+  async markSold({ listingId, buyer }) {
+    const { error } = await this.sb.from('market_listings').update({ sold_at: nowTs(), buyer: buyer || null }).eq('id', listingId);
+    if (error) throw error;
+    return true;
+  }
+  async getCollectionsWithMints() {
+    const cols = await this.getCollections();
+    const results = [];
+    for (const c of cols) {
+      const { data } = await this.sb.from('mints').select('mint').eq('collection_id', c.id);
+      results.push({ id: c.id, name: c.name, symbol: c.symbol, image_gateway: c.image_gateway, mints: (data || []).map((x) => x.mint) });
+    }
+    return results;
   }
 }
 
@@ -537,6 +677,7 @@ class SQLiteDB {
 let impl = null;
 export function getDbType() {
   if (!impl) return 'uninitialized';
+  if (impl instanceof SupabaseDB) return 'supabase';
   if (impl instanceof KVDB) return 'kv';
   // best-effort detection for SQLite class name
   if (impl.constructor && /SQLiteDB/.test(impl.constructor.name)) return 'sqlite';
@@ -544,6 +685,19 @@ export function getDbType() {
 }
 export async function initDb() {
   if (impl) return impl;
+  // Prefer Supabase if configured
+  const supaUrl = process.env.SUPABASE_URL;
+  const supaKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_KEY;
+  if (supaUrl && supaKey) {
+    try {
+      impl = new SupabaseDB({ url: supaUrl, key: supaKey });
+      await impl.init();
+      return impl;
+    } catch (e) {
+      console.warn('[db] Supabase init failed; will try other backends:', e?.message || e);
+      impl = null;
+    }
+  }
   // Prefer KV if configured (works on Vercel serverless)
   const kvUrl = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
   const kvToken = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
