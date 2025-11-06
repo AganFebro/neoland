@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>neoland • Collection Market</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="page-market-coll">
+    <header class="nb-header">
+      <div class="container row between center">
+        <h1 class="logo">neoland</h1>
+        <nav class="nav">
+          <a href="/" class="nav-link">Home</a>
+          <a href="/deploy" class="nav-link">Deploy</a>
+          <a href="/mint" class="nav-link">Mint</a>
+          <a href="/market" class="nav-link active">Market</a>
+          <a href="/collection" class="nav-link">Collection</a>
+        </nav>
+        <div class="row gap center">
+          <span id="networkBadge" class="badge" title="Network"></span>
+          <button id="connectBtn" class="btn btn-accent">Connect Backpack</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="container">
+      <section class="card">
+        <span class="badge-sticker">COLLECTION</span>
+        <div class="toolbar">
+          <div class="stack">
+            <h3 id="collTitle" class="subtitle">Collection</h3>
+            <div id="collMeta" class="small muted"></div>
+            <div id="statsRow" class="stats-row mt">
+              <div class="stat"><div class="label">Floor</div><div class="value" id="statFloor">—</div><div class="sub" id="statFloorUsd"></div></div>
+              <div class="stat"><div class="label">24H Volume</div><div class="value" id="statVol24">—</div><div class="sub" id="statVol24Usd"></div></div>
+              <div class="stat"><div class="label">Total Volume</div><div class="value" id="statVolTotal">—</div><div class="sub" id="statVolTotalUsd"></div></div>
+            </div>
+            <div class="row gap mt" role="tablist" aria-label="Collection sections">
+              <button id="tabItems" class="btn btn-ghost" role="tab" aria-selected="true">Items</button>
+              <button id="tabActivity" class="btn btn-ghost" role="tab" aria-selected="false">Activity</button>
+            </div>
+          </div>
+          <input id="itemSearch" class="input-search" placeholder="Search by mint" />
+        </div>
+        <section id="sectionItems">
+          <div id="itemsWrap" class="grid">
+            <div class="skeleton block"></div>
+            <div class="skeleton text"></div>
+          </div>
+        </section>
+        <section id="sectionActivity" class="hidden">
+          <div id="activityWrap">
+            <div class="skeleton block"></div>
+            <div class="skeleton text"></div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <footer class="container muted small center mt">Participating in CARV Hackathon, website may be unstable.</footer>
+
+    <script type="module" src="/market-collection.js?v=2"></script>
+  </body>
+  </html>

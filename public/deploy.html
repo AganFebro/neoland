@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>neoland • Deploy</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="page-deploy">
+    <header class="nb-header">
+      <div class="container row between center">
+        <h1 class="logo">neoland</h1>
+        <nav class="nav">
+          <a href="/" class="nav-link">Home</a>
+          <a href="/deploy" class="nav-link">Deploy</a>
+          <a href="/mint" class="nav-link">Mint</a>
+          <a href="/market" class="nav-link">Market</a>
+          <a href="/collection" class="nav-link">Collection</a>
+        </nav>
+        <div class="row gap center">
+          <span id="networkBadge" class="badge" title="Network"></span>
+          <button id="connectBtn" class="btn btn-accent">Connect Backpack</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="container">
+      <section class="card">
+        <h3 class="subtitle">Deploy New Collection</h3>
+        <div class="deploy-grid">
+          <form id="deployForm">
+            <label class="stack">
+              <span class="label">Name</span>
+              <input class="input" id="depName" required />
+            </label>
+            <label class="stack mt">
+              <span class="label">Image</span>
+              <input class="input sr-only" id="depImage" type="file" accept="image/png,image/jpeg" required />
+              <div id="depDrop" class="file-drop" tabindex="0" role="button" aria-controls="depImage">
+                <span class="btn" aria-hidden="true">Upload Image</span>
+                <span id="depFileName" class="small muted">PNG/JPG • drag & drop supported</span>
+              </div>
+            </label>
+            <label class="stack mt">
+              <span class="label">Symbol</span>
+              <input class="input" id="depSymbol" required />
+            </label>
+            <label class="stack mt">
+              <span class="label">Supply (max mints)</span>
+              <input class="input" id="depSupply" type="number" min="10" max="100000" value="10" />
+            </label>
+            <label class="stack mt">
+              <span class="label">Price (SOL)</span>
+              <input class="input" id="depPrice" type="number" min="0" step="0.0001" value="0" />
+              <div id="depPriceUsd" class="small muted" aria-live="polite"></div>
+            </label>
+          </form>
+
+          <div>
+            <div class="label">Preview</div>
+            <div class="square-frame mt">
+              <img id="depPreview" alt="" loading="lazy" />
+              <div id="depPlaceholder" class="placeholder">
+                Drop or choose an image
+                <div class="mini">PNG/JPG • shows here instantly</div>
+              </div>
+            </div>
+            <div class="deploy-actions">
+              <button form="deployForm" type="submit" class="btn">Deploy Now!!!</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="deploySuccess" class="card hidden">
+        <h3 class="subtitle">Success</h3>
+        <div id="deploySuccessBody" class="muted"></div>
+        <div class="deploy-actions">
+          <button id="copyDeployId" class="btn">Copy ID</button>
+          <a id="goToMint" class="btn btn-ghost" href="/mint">Go to Mint</a>
+          <a id="viewCollection" class="btn btn-ghost" href="/collection">View Collection</a>
+        </div>
+      </section>
+    </main>
+
+    <footer class="container muted small center mt">Participating in CARV Hackathon, website may be unstable.</footer>
+
+    <script type="module" src="/deploy.js?v=2"></script>
+  </body>
+  </html>

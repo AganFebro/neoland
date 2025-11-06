@@ -1,0 +1,20 @@
+[programs.localnet]
+market = "MARKET_PROGRAM_ID_PLACEHOLDER"
+
+[provider]
+# Use a valid URL or one of: localnet, devnet, testnet, mainnet
+cluster = "https://rpc.testnet.carv.io/rpc"
+wallet = "~/.config/solana/id.json"
+
+[test]
+startup_wait = 10000
+
+[registry]
+url = "https://anchor.projectserum.com"
+
+[workspace]
+members = ["programs/market"]
+
+[scripts]
+build = "anchor build"
+deploy = "anchor deploy"

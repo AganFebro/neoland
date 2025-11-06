@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>neoland • Market</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="page-market">
+    <header class="nb-header">
+      <div class="container row between center">
+        <h1 class="logo">neoland</h1>
+        <nav class="nav">
+          <a href="/" class="nav-link">Home</a>
+          <a href="/deploy" class="nav-link">Deploy</a>
+          <a href="/mint" class="nav-link">Mint</a>
+          <a href="/market" class="nav-link">Market</a>
+          <a href="/collection" class="nav-link">Collection</a>
+        </nav>
+        <div class="row gap center">
+          <span id="networkBadge" class="badge" title="Network"></span>
+          <button id="connectBtn" class="btn btn-accent">Connect Backpack</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="container">
+      <section class="card">
+        <span class="badge-sticker">MARKET</span>
+        <div class="toolbar">
+          <h3 class="subtitle">Collections</h3>
+          <input id="collSearch" class="input-search" placeholder="Search collections" />
+        </div>
+        <div id="collectionsWrap">
+          <div class="skeleton text"></div>
+          <div class="skeleton block"></div>
+        </div>
+        <div id="collectionsPager" class="row gap mt" aria-label="Collections pages"></div>
+      </section>
+
+      <section class="card">
+        <div class="row between center">
+          <h3 class="subtitle">List Your NFTs</h3>
+          <button id="marketConnect" class="btn">Connect Backpack</button>
+        </div>
+        <div id="marketHoldings" class="grid mt"></div>
+      </section>
+
+      <section class="card">
+        <h3 class="subtitle">My Listings</h3>
+        <div id="myListings" class="grid mt"></div>
+      </section>
+    </main>
+
+    <footer class="container muted small center mt">Participating in CARV Hackathon, website may be unstable.</footer>
+
+    <script type="module" src="/market.js?v=4"></script>
+  </body>
+  </html>

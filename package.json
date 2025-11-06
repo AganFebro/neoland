@@ -1,0 +1,28 @@
+{
+  "name": "dual-deploy",
+  "version": "1.0.0",
+  "type": "module",
+  "bin": {
+    "dual-deploy": "dual-deploy.js"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.32.1",
+    "@lighthouse-web3/sdk": "^0.3.7",
+    "@metaplex-foundation/mpl-candy-machine": "^6.1.0",
+    "@metaplex-foundation/mpl-token-metadata": "3.4.0",
+    "@metaplex-foundation/umi-bundle-defaults": "1.4.1",
+    "@solana/spl-token": "^0.4.14",
+    "@solana/web3.js": "^1.98.4",
+    "axios": "^1.13.1",
+    "better-sqlite3": "^12.4.1",
+    "bs58": "^6.0.0",
+    "commander": "^12.1.0",
+    "dotenv": "^16.6.1",
+    "form-data": "^4.0.4",
+    "mime": "^4.1.0",
+    "nanoid": "^5.1.6"
+  }
+}

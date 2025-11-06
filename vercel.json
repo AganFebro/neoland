@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "functions": {
+    "api/index.mjs": {
+      "runtime": "nodejs22.x"
+    }
+  },
+  "routes": [
+    { "src": "/(.*)", "dest": "/api/index.mjs" }
+  ]
+}
+

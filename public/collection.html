@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>neoland • Collection</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="page-collection">
+    <header class="nb-header">
+      <div class="container row between center">
+        <h1 class="logo">neoland</h1>
+        <nav class="nav">
+          <a href="/" class="nav-link">Home</a>
+          <a href="/deploy" class="nav-link">Deploy</a>
+          <a href="/mint" class="nav-link">Mint</a>
+          <a href="/market" class="nav-link">Market</a>
+          <a href="/collection" class="nav-link">Collection</a>
+        </nav>
+        <div class="row gap center">
+          <span id="networkBadge" class="badge" title="Network"></span>
+          <button id="connectBtn" class="btn btn-accent">Connect Backpack</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="container">
+      <section class="card">
+        <span class="badge-sticker">WALLET</span>
+        <div class="toolbar">
+          <h3 class="subtitle">My Holdings</h3>
+          <div id="portfolioValue" class="pill">—</div>
+        </div>
+        <div id="holdingsCallout" class="muted">Connect your wallet to see NFTs you hold across all collections.</div>
+        <div class="deploy-actions">
+          <button id="connectForHoldings" class="btn">Connect Backpack</button>
+        </div>
+        <div id="holdingsWrap" class="grid mt"></div>
+      </section>
+    </main>
+
+    <footer class="container muted small center mt">Participating in CARV Hackathon, website may be unstable.</footer>
+
+    <script type="module" src="/collection.js?v=2"></script>
+  </body>
+  </html>

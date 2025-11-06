@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>neoland • Home</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <style>
+@import url('https://fonts.googleapis.com/css2?family=Old+Standard+TT:ital,wght@0,400;0,700;1,400&display=swap');
+</style>
+  </head>
+  <body class="page-home">
+    <header class="nb-header">
+      <div class="container row between center">
+        <h1 class="logo">neoland</h1>
+        <nav class="nav">
+          <a href="/" class="nav-link">Home</a>
+          <a href="/deploy" class="nav-link">Deploy</a>
+          <a href="/mint" class="nav-link">Mint</a>
+          <a href="/market" class="nav-link">Market</a>
+          <a href="/collection" class="nav-link">Collection</a>
+        </nav>
+        <div class="row gap center">
+          <span id="networkBadge" class="badge" title="Network"></span>
+          <button id="connectBtn" class="btn btn-accent">Connect Backpack</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="container">
+      <section class="card">
+        <span class="badge-sticker">NEW</span>
+        <div class="row between center">
+          <div>
+            <h2 class="title">Your Only Place for NFT</h2>
+            <p class="muted">Deploy, mint, and explore hyped collections on CARV SVM.</p>
+            <div class="row gap">
+              <a href="/mint" class="btn">Go to Mint</a>
+              <a href="/deploy" class="btn btn-ghost">Create Collection</a>
+            </div>
+          </div>
+          <div class="hero-wrap">
+            <img src="/neoland-yellow.png" alt="hero" class="hero" loading="lazy" />
+            <div class="shape squiggle" style="position:absolute; right:-18px; bottom:-18px"></div>
+            <div class="shape eye" style="position:absolute; left:-18px; top:-14px"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h3 class="subtitle">Why OpenLand</h3>
+        <div class="grid">
+          <div class="nft" role="article">
+            <div class="pill">Deploy</div>
+            <p class="muted">Ship a collection with a bold, wallet‑signed flow.</p>
+          </div>
+          <div class="nft" role="article">
+            <div class="pill">Mint</div>
+            <p class="muted">Fast mints, juicy feedback, instant toast confirmations.</p>
+          </div>
+          <div class="nft" role="article">
+            <div class="pill">Market</div>
+            <p class="muted">Browse listings with floor, volume and search.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h3 class="subtitle">Hyped Right Now</h3>
+        <div id="hypedWrap" class="grid"></div>
+      </section>
+    </main>
+
+    <footer class="container muted small center mt">
+      Participating in CARV Hackathon, website may be unstable.
+    </footer>
+
+    <script type="module" src="/home.js?v=2"></script>
+  </body>
+  </html>
