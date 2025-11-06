@@ -74,35 +74,39 @@ async function handleMintClientTx(ev, id) {
   const { publicKey, provider } = conn;
   const btn = ev?.target; if (btn) { btn.disabled = true; btn.textContent = 'Minting...'; }
   try {
-    const { Keypair, Transaction, Connection } = await import('https://esm.sh/@solana/web3.js@1.98.0');
-    const mint = Keypair.generate();
-    const r = await fetchJSON('/api/tx/mint-nft', {
-      method: 'POST',
-      body: JSON.stringify({ id, payer: publicKey, mintPubkey: mint.publicKey.toBase58() }),
-    });
-    const buf = Uint8Array.from(atob(r.tx), c => c.charCodeAt(0));
-    const tx = Transaction.from(buf);
-    tx.partialSign(mint);
-    const signed = await provider.signTransaction(tx);
-    const { rpc } = await getConfig();
-    const connection = new Connection(rpc, 'confirmed');
-    const sig = await sendAndTrack(connection, signed.serialize(), { commitment: 'confirmed', timeoutMs: 120000 });
+    const { Transaction, Connection, Keypair } = await import('https://esm.sh/@solana/web3.js@1.98.0');
+    let sig, mintAddr;
     try {
-      await waitForConfirmation(connection, sig, { timeoutMs: 90000, desired: 'confirmed' });
-    } catch (e) {
-      // Surface a non-fatal toast if network is slow
-      showToast('Network slow to confirm. Check explorer.', { title: 'Pending', variant: 'info', actions: [ { label: 'View on Explorer', onClick: async () => window.open(await txExplorerUrl(sig), '_blank') } ] });
+      // Try program mint first (locks metadata, owner authority)
+      const r2 = await fetchJSON('/api/tx/program-mint', { method: 'POST', body: JSON.stringify({ id, payer: publicKey, recipient: publicKey, nonce: Date.now(), lock: true }) });
+      const buf2 = Uint8Array.from(atob(r2.tx), c => c.charCodeAt(0));
+      const tx2 = Transaction.from(buf2);
+      const signed2 = await provider.signTransaction(tx2);
+      const { rpc } = await getConfig();
+      const connection = new Connection(rpc, 'confirmed');
+      sig = await sendAndTrack(connection, signed2.serialize(), { commitment: 'confirmed', timeoutMs: 120000 });
+      mintAddr = r2.mint;
+    } catch (err) {
+      // Fallback to legacy flow
+      const mint = Keypair.generate();
+      const r = await fetchJSON('/api/tx/mint-nft', { method: 'POST', body: JSON.stringify({ id, payer: publicKey, mintPubkey: mint.publicKey.toBase58() }) });
+      const buf = Uint8Array.from(atob(r.tx), c => c.charCodeAt(0));
+      const tx = Transaction.from(buf);
+      tx.partialSign(mint);
+      const signed = await provider.signTransaction(tx);
+      const { rpc } = await getConfig();
+      const connection = new Connection(rpc, 'confirmed');
+      sig = await sendAndTrack(connection, signed.serialize(), { commitment: 'confirmed', timeoutMs: 120000 });
+      mintAddr = mint.publicKey.toBase58();
     }
-    await fetchJSON('/api/record-mint', { method: 'POST', body: JSON.stringify({ id, mint: mint.publicKey.toBase58(), minter: publicKey, ts: Math.floor(Date.now()/1000) }) });
+    try {
+      const { rpc } = await getConfig();
+      const connection = new Connection(rpc, 'confirmed');
+      await waitForConfirmation(connection, sig, { timeoutMs: 90000, desired: 'confirmed' });
+    } catch {}
+    await fetchJSON('/api/record-mint', { method: 'POST', body: JSON.stringify({ id, mint: mintAddr, minter: publicKey, ts: Math.floor(Date.now()/1000) }) });
     const short = `${sig.slice(0, 6)}...${sig.slice(-6)}`;
-    showToast(`Tx: ${short}`, {
-      title: 'Minted! 🎉',
-      variant: 'success',
-      actions: [
-        { label: 'Copy Tx', onClick: () => navigator.clipboard?.writeText(sig) },
-        { label: 'View on Explorer', onClick: async () => window.open(await txExplorerUrl(sig), '_blank') },
-      ],
-    });
+    showToast(`Tx: ${short}`, { title: 'Minted! 🎉', variant: 'success', actions: [ { label: 'Copy Tx', onClick: () => navigator.clipboard?.writeText(sig) }, { label: 'View on Explorer', onClick: async () => window.open(await txExplorerUrl(sig), '_blank') } ] });
     await loadCollections();
   } catch (e) {
     console.error(e);

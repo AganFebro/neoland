@@ -4,6 +4,17 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>neoland • Collection</title>
+    <script>
+      (function(){
+        try {
+          var t = localStorage.getItem('theme');
+          if (t !== 'dark' && t !== 'light') {
+            t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+          }
+          document.documentElement.setAttribute('data-theme', t);
+        } catch {}
+      })();
+    </script>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body class="page-collection">
@@ -19,6 +30,7 @@
         </nav>
         <div class="row gap center">
           <span id="networkBadge" class="badge" title="Network"></span>
+          <button id="themeToggle" class="btn btn-ghost" aria-label="Toggle dark mode" title="Dark mode">🌙</button>
           <button id="connectBtn" class="btn btn-accent">Connect Backpack</button>
         </div>
       </div>

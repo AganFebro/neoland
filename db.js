@@ -63,6 +63,7 @@ class FileDB {
         image_gateway: c.image_gateway || null,
         metadata_uri: c.metadata_uri || null,
         metadata_gateway: c.metadata_gateway || null,
+        onchain_pda: c.onchain_pda || null,
         minted_count: Number(c.minted_count || 0),
         created_at: Number(c.created_at || 0),
       }));
@@ -82,13 +83,14 @@ class FileDB {
       image_gateway: c.image_gateway || null,
       metadata_uri: c.metadata_uri || null,
       metadata_gateway: c.metadata_gateway || null,
+      onchain_pda: c.onchain_pda || null,
       minted_count: Number(c.minted_count || 0),
       created_at: Number(c.created_at || 0),
       mints: Array.isArray(c.mints) ? c.mints.slice() : [],
       mintEvents: Array.isArray(c.mintEvents) ? c.mintEvents.slice() : [],
     };
   }
-  async createCollection({ name, symbol, supply, priceLamports, imageCid, metadataUri, metadataGateway, owner }) {
+  async createCollection({ name, symbol, supply, priceLamports, imageCid, metadataUri, metadataGateway, owner, onchainPda = null }) {
     const id = randId();
     await this._mutate((db) => {
       db[id] = {
@@ -102,6 +104,7 @@ class FileDB {
         image_gateway: imageCid ? (process.env.PINATA_GATEWAY || 'https://gateway.pinata.cloud') + '/ipfs/' + imageCid : null,
         metadata_uri: metadataUri,
         metadata_gateway: metadataGateway || null,
+        onchain_pda: onchainPda || null,
         tokenAddress: null,
         minted_count: 0,
         mints: [],

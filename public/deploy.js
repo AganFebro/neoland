@@ -2,9 +2,12 @@ import { fetchJSON, connectBackpack, showToast, getConfig, txExplorerUrl, waitFo
 
 window.addEventListener('DOMContentLoaded', () => {
   const form = document.getElementById('deployForm');
+  const submitBtn = document.querySelector('button[form="deployForm"][type="submit"], #deployForm button[type="submit"]');
+  let isSubmitting = false;
   const fileInput = document.getElementById('depImage');
   const preview = document.getElementById('depPreview');
   const priceInput = document.getElementById('depPrice');
+  const mintNowInput = document.getElementById('depMintNow');
   const placeholder = document.getElementById('depPlaceholder');
   const drop = document.getElementById('depDrop');
   const fileName = document.getElementById('depFileName');
@@ -67,6 +70,7 @@ window.addEventListener('DOMContentLoaded', () => {
   }
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
+    if (isSubmitting) return; // guard against double-submit
     const conn = await connectBackpack();
     if (!conn) return;
     const { publicKey, provider } = conn;
@@ -88,6 +92,10 @@ window.addEventListener('DOMContentLoaded', () => {
     if (!file) { showToast('Choose an image', { title: 'Validation', variant: 'error' }); return; }
 
     const reader = new FileReader();
+    // mark in-flight and disable UI before any async work
+    isSubmitting = true;
+    if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Deploying…'; }
+    Array.from(form.querySelectorAll('input, button')).forEach(el => { el.disabled = true; });
     reader.onload = async () => {
       try {
         const base64 = reader.result.split(',')[1];
@@ -106,53 +114,87 @@ window.addEventListener('DOMContentLoaded', () => {
             properties: { files: [{ uri: img.gateway, type: file.type || 'image/png' }] },
           }),
         });
-        // Wallet-signed mint (1/1) — atomically create collection and build tx
-        const { Keypair, Transaction, Connection } = await import('https://esm.sh/@solana/web3.js@1.98.0');
-        const mint = Keypair.generate();
-        const r = await fetchJSON('/api/deploy-and-mint', {
-          method: 'POST',
-          body: JSON.stringify({ name, symbol, supply, price, imageCid: img.imageCid, metadataUri: meta.metadataUri, metadataGateway: meta.gateway, owner: publicKey, payer: publicKey, mintPubkey: mint.publicKey.toBase58() }),
-        });
-        const buf = Uint8Array.from(atob(r.tx), c => c.charCodeAt(0));
-        const tx = Transaction.from(buf);
-        tx.partialSign(mint);
-        const signed = await provider.signTransaction(tx);
-        const { rpc } = await getConfig();
-        const connection = new Connection(rpc, 'confirmed');
-        const sig = await sendAndTrack(connection, signed.serialize(), { commitment: 'confirmed', timeoutMs: 120000 });
-        try {
-          await waitForConfirmation(connection, sig, { timeoutMs: 90000, desired: 'confirmed' });
-        } catch (e) {
-          showToast('Network slow to confirm. Check explorer.', { title: 'Pending', variant: 'info', actions: [ { label: 'View on Explorer', onClick: async () => window.open(await txExplorerUrl(sig), '_blank') } ] });
+        const mintNow = !!mintNowInput?.checked;
+        let collId = null;
+        if (mintNow) {
+          // Wallet-signed mint (1/1) — atomically create collection and build tx
+          const { Keypair, Transaction, Connection } = await import('https://esm.sh/@solana/web3.js@1.98.0');
+          const mint = Keypair.generate();
+          const r = await fetchJSON('/api/deploy-and-mint', {
+            method: 'POST',
+            body: JSON.stringify({ name, symbol, supply, price, imageCid: img.imageCid, metadataUri: meta.metadataUri, metadataGateway: meta.gateway, owner: publicKey, payer: publicKey, mintPubkey: mint.publicKey.toBase58() }),
+          });
+          collId = r.id;
+          const buf = Uint8Array.from(atob(r.tx), c => c.charCodeAt(0));
+          const tx = Transaction.from(buf);
+          tx.partialSign(mint);
+          const signed = await provider.signTransaction(tx);
+          const { rpc } = await getConfig();
+          const connection = new Connection(rpc, 'confirmed');
+          const sig = await sendAndTrack(connection, signed.serialize(), { commitment: 'confirmed', timeoutMs: 120000 });
+          try {
+            await waitForConfirmation(connection, sig, { timeoutMs: 90000, desired: 'confirmed' });
+          } catch (e) {
+            showToast('Network slow to confirm. Check explorer.', { title: 'Pending', variant: 'info', actions: [ { label: 'View on Explorer', onClick: async () => window.open(await txExplorerUrl(sig), '_blank') } ] });
+          }
+          await fetchJSON('/api/record-mint', { method: 'POST', body: JSON.stringify({ id: r.id, mint: mint.publicKey.toBase58(), minter: publicKey, ts: Math.floor(Date.now()/1000) }) });
+          const short = `${sig.slice(0, 6)}...${sig.slice(-6)}`;
+          const toast = showToast(`ID: <code>${collId}</code><br/>Tx: ${short}<br/><br/>Redirecting to Mint in <span id="depCountdown">5</span>s…`, {
+            title: 'Deployed + Minted 1/1',
+            variant: 'success',
+            actions: [
+              { label: 'Copy Tx', onClick: () => navigator.clipboard?.writeText(sig) },
+              { label: 'View on Explorer', onClick: async () => window.open(await txExplorerUrl(sig), '_blank') },
+              { label: 'Go Now', onClick: () => (window.location.href = '/mint') },
+            ],
+          });
+          // Auto-redirect countdown
+          let n = 5;
+          const el = toast?.querySelector?.('#depCountdown');
+          const timer = setInterval(() => { n -= 1; if (el) el.textContent = String(n); if (n <= 0) { clearInterval(timer); window.location.href = '/mint'; } }, 1000);
+        } else {
+          // Create on-chain collection PDA proof, then register in DB (no mint)
+          const init = await fetchJSON('/api/tx/init-collection', {
+            method: 'POST',
+            body: JSON.stringify({ payer: publicKey, owner: publicKey, name, symbol, metadataUri: meta.metadataUri, price, supply }),
+          });
+          const { Transaction, Connection } = await import('https://esm.sh/@solana/web3.js@1.98.0');
+          const buf = Uint8Array.from(atob(init.tx), c => c.charCodeAt(0));
+          const tx = Transaction.from(buf);
+          const signed = await provider.signTransaction(tx);
+          const { rpc } = await getConfig();
+          const connection = new Connection(rpc, 'confirmed');
+          const sig = await sendAndTrack(connection, signed.serialize(), { commitment: 'confirmed', timeoutMs: 120000 });
+          try { await waitForConfirmation(connection, sig, { timeoutMs: 90000, desired: 'confirmed' }); } catch {}
+
+          const r = await fetchJSON('/api/deploy/config', {
+            method: 'POST',
+            body: JSON.stringify({ name, symbol, supply, price, imageCid: img.imageCid, metadataUri: meta.metadataUri, metadataGateway: meta.gateway, owner: publicKey, onchainPda: init.collectionPda }),
+          });
+          collId = r.id;
+          const short = `${sig.slice(0, 6)}...${sig.slice(-6)}`;
+          showToast(`ID: <code>${collId}</code><br/>On-chain: ${short}`, { title: 'Collection Created', variant: 'success', actions: [ { label: 'View Tx', onClick: async () => window.open(await txExplorerUrl(sig), '_blank') }, { label: 'Go to Mint', onClick: () => (window.location.href = '/mint') } ] });
         }
-        await fetchJSON('/api/record-mint', { method: 'POST', body: JSON.stringify({ id: r.id, mint: mint.publicKey.toBase58(), minter: publicKey, ts: Math.floor(Date.now()/1000) }) });
-        const short = `${sig.slice(0, 6)}...${sig.slice(-6)}`;
-        const toast = showToast(`ID: ${r.id}<br/>Tx: ${short}<br/><br/>Redirecting to Mint in <span id="depCountdown">5</span>s…`, {
-          title: 'Deployed + Minted 1/1',
-          variant: 'success',
-          actions: [
-            { label: 'Copy Tx', onClick: () => navigator.clipboard?.writeText(sig) },
-            { label: 'View on Explorer', onClick: async () => window.open(await txExplorerUrl(sig), '_blank') },
-            { label: 'Go Now', onClick: () => (window.location.href = '/mint') },
-          ],
-        });
-        // Auto-redirect countdown
-        let n = 5;
-        const el = toast?.querySelector?.('#depCountdown');
-        const timer = setInterval(() => { n -= 1; if (el) el.textContent = String(n); if (n <= 0) { clearInterval(timer); window.location.href = '/mint'; } }, 1000);
 
         // Fill success panel
         const sec = document.getElementById('deploySuccess');
         const body = document.getElementById('deploySuccessBody');
         if (sec && body) {
           sec.style.display = '';
-          body.innerHTML = `Your collection was created. ID: <code>${r.id}</code>`;
+          body.innerHTML = `Your collection was created. ID: <code>${collId || ''}</code>`;
           const copyBtn = document.getElementById('copyDeployId');
-          if (copyBtn) copyBtn.onclick = () => navigator.clipboard?.writeText(r.id);
+          if (copyBtn && collId) copyBtn.onclick = () => navigator.clipboard?.writeText(collId);
         }
       } catch (err) {
         console.error(err);
         showToast((err.message || String(err)), { title: 'Deploy failed', variant: 'error', duration: 7000 });
+        // re-enable on failure so user can try again
+        isSubmitting = false;
+        if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Deploy Now!!!'; }
+        Array.from(form.querySelectorAll('input, button')).forEach(el => {
+          // Keep Connect button enabled; others back to normal
+          if (el.id !== 'connectBtn') el.disabled = false;
+        });
       }
     };
     reader.readAsDataURL(file);

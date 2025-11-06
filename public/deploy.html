@@ -4,6 +4,17 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>neoland • Deploy</title>
+    <script>
+      (function(){
+        try {
+          var t = localStorage.getItem('theme');
+          if (t !== 'dark' && t !== 'light') {
+            t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+          }
+          document.documentElement.setAttribute('data-theme', t);
+        } catch {}
+      })();
+    </script>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body class="page-deploy">
@@ -19,6 +30,7 @@
         </nav>
         <div class="row gap center">
           <span id="networkBadge" class="badge" title="Network"></span>
+          <button id="themeToggle" class="btn btn-ghost" aria-label="Toggle dark mode" title="Dark mode">🌙</button>
           <button id="connectBtn" class="btn btn-accent">Connect Backpack</button>
         </div>
       </div>
@@ -53,6 +65,11 @@
               <span class="label">Price (SOL)</span>
               <input class="input" id="depPrice" type="number" min="0" step="0.0001" value="0" />
               <div id="depPriceUsd" class="small muted" aria-live="polite"></div>
+            </label>
+
+            <label class="row mt center" style="gap:10px">
+              <input id="depMintNow" type="checkbox" checked />
+              <span>Mint one now (wallet signs and pays price)</span>
             </label>
           </form>
 

@@ -274,6 +274,32 @@ export async function disconnectBackpack() {
 
 // Wire connect button on load and try silent auto-connect
 window.addEventListener('DOMContentLoaded', () => {
+  // Theme setup
+  const getPreferredTheme = () => {
+    const saved = localStorage.getItem('theme');
+    if (saved === 'dark' || saved === 'light') return saved;
+    return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  };
+  const applyTheme = (t) => {
+    try { document.documentElement.setAttribute('data-theme', t); } catch {}
+    const tt = document.getElementById('themeToggle');
+    if (tt) {
+      tt.textContent = t === 'dark' ? '☀️' : '🌙';
+      tt.setAttribute('aria-label', t === 'dark' ? 'Switch to light mode' : 'Switch to dark mode');
+      tt.setAttribute('title', t === 'dark' ? 'Light mode' : 'Dark mode');
+    }
+  };
+  applyTheme(getPreferredTheme());
+  const themeBtn = document.getElementById('themeToggle');
+  if (themeBtn) {
+    themeBtn.addEventListener('click', () => {
+      const cur = document.documentElement.getAttribute('data-theme') || getPreferredTheme();
+      const next = cur === 'dark' ? 'light' : 'dark';
+      localStorage.setItem('theme', next);
+      applyTheme(next);
+    });
+  }
+
   // Active nav highlight
   const here = location.pathname.replace(/\/+$/, '');
   const links = document.querySelectorAll('.nav .nav-link');
