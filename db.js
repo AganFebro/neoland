@@ -191,6 +191,168 @@ class FileDB {
   }
 }
 
+// Simple KV-backed DB for Vercel KV / Upstash Redis REST API
+class KVDB {
+  constructor({ url, token, key = 'bang:db' }) {
+    this.url = url.replace(/\/?$/, '');
+    this.token = token;
+    this.key = key;
+    this._loaded = false;
+    this._db = {};
+  }
+  async _kvGet() {
+    const r = await fetch(`${this.url}/get/${encodeURIComponent(this.key)}`, {
+      headers: { Authorization: `Bearer ${this.token}` },
+    });
+    if (!r.ok) return null;
+    const j = await r.json().catch(() => ({}));
+    if (!j || j.result == null) return null;
+    try { return JSON.parse(j.result); } catch { return null; }
+  }
+  async _kvSet(val) {
+    const body = { value: JSON.stringify(val) };
+    const r = await fetch(`${this.url}/set/${encodeURIComponent(this.key)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.token}` },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error('kv set failed: ' + r.status);
+    return true;
+  }
+  async _load() {
+    if (this._loaded) return;
+    try {
+      const j = await this._kvGet();
+      this._db = j && typeof j === 'object' ? j : {};
+    } catch { this._db = {}; }
+    this._loaded = true;
+  }
+  async _save() { await this._kvSet(this._db); }
+  async init() { await this._load(); }
+  // Collections
+  async getCollections() {
+    await this._load();
+    return Object.entries(this._db)
+      .filter(([id, c]) => id !== 'market' && c && typeof c === 'object' && (c.collectionName || c.symbol || c.metadata_uri))
+      .map(([id, c]) => ({
+        id,
+        owner: c.deployer_address || null,
+        name: c.collectionName || 'Collection',
+        symbol: c.symbol || '',
+        supply: Number(c.supply || 0),
+        priceLamports: Number(c.priceLamports ?? Math.round(Number(c.price || 0) * 1_000_000_000)),
+        image_cid: c.image_cid || null,
+        image_gateway: c.image_gateway || null,
+        metadata_uri: c.metadata_uri || null,
+        metadata_gateway: c.metadata_gateway || null,
+        minted_count: Number(c.minted_count || 0),
+        created_at: Number(c.created_at || 0),
+      }));
+  }
+  async getCollectionById(id) {
+    await this._load();
+    const c = this._db[id];
+    if (!c) return null;
+    return {
+      id,
+      owner: c.deployer_address || null,
+      name: c.collectionName || 'Collection',
+      symbol: c.symbol || '',
+      supply: Number(c.supply || 0),
+      priceLamports: Number(c.priceLamports ?? Math.round(Number(c.price || 0) * 1_000_000_000)),
+      image_cid: c.image_cid || null,
+      image_gateway: c.image_gateway || null,
+      metadata_uri: c.metadata_uri || null,
+      metadata_gateway: c.metadata_gateway || null,
+      minted_count: Number(c.minted_count || 0),
+      created_at: Number(c.created_at || 0),
+      mints: Array.isArray(c.mints) ? c.mints.slice() : [],
+      mintEvents: Array.isArray(c.mintEvents) ? c.mintEvents.slice() : [],
+    };
+  }
+  async createCollection({ name, symbol, supply, priceLamports, imageCid, metadataUri, metadataGateway, owner }) {
+    await this._load();
+    const id = randId();
+    const now = nowTs();
+    this._db[id] = {
+      deployer_address: owner,
+      collectionName: name,
+      symbol,
+      supply: Number(supply || 0),
+      price: Number(priceLamports || 0) / 1_000_000_000,
+      priceLamports: Number(priceLamports || 0),
+      image_cid: imageCid || null,
+      image_gateway: imageCid ? (process.env.PINATA_GATEWAY || 'https://gateway.pinata.cloud') + '/ipfs/' + imageCid : null,
+      metadata_uri: metadataUri,
+      metadata_gateway: metadataGateway || null,
+      tokenAddress: null,
+      minted_count: 0,
+      mints: [],
+      mintEvents: [],
+      created_at: now,
+    };
+    await this._save();
+    return id;
+  }
+  async getMintsForCollection(id) {
+    const c = await this.getCollectionById(id);
+    return { mints: c ? (c.mints || []) : [], image_gateway: c?.image_gateway || null };
+  }
+  async recordMint({ id, mint, minter = null, ts = nowTs() }) {
+    await this._load();
+    if (!this._db[id]) return false;
+    const coll = this._db[id];
+    coll.mints = Array.isArray(coll.mints) ? coll.mints : [];
+    if (!coll.mints.includes(mint)) coll.mints.push(mint);
+    coll.mintEvents = Array.isArray(coll.mintEvents) ? coll.mintEvents : [];
+    coll.mintEvents.push({ mint, minter, ts: Number(ts) || nowTs() });
+    coll.minted_count = Number(coll.minted_count || 0) + 1;
+    await this._save();
+    return true;
+  }
+  // Listings
+  async getListings({ collectionId, seller, activeOnly = true }) {
+    await this._load();
+    const market = this._db.market || { listings: [] };
+    let listings = Array.isArray(market.listings) ? market.listings.slice() : [];
+    if (collectionId) listings = listings.filter((l) => l.collectionId === collectionId);
+    if (seller) listings = listings.filter((l) => l.seller === seller);
+    if (activeOnly) listings = listings.filter((l) => !l.cancelled && !l.soldAt);
+    return listings;
+  }
+  async getListingById(id) {
+    await this._load();
+    const market = this._db.market || { listings: [] };
+    const listings = Array.isArray(market.listings) ? market.listings : [];
+    return listings.find((l) => l.id === id) || null;
+  }
+  async createListing({ mint, collectionId, seller, priceLamports }) {
+    await this._load();
+    const id = randId();
+    const createdAt = nowTs();
+    if (!this._db.market) this._db.market = { listings: [] };
+    this._db.market.listings.push({ id, mint, collectionId, seller, priceLamports: Number(priceLamports || 0), createdAt });
+    await this._save();
+    return { id };
+  }
+  async cancelListing({ listingId }) {
+    await this._load();
+    const l = await this.getListingById(listingId);
+    if (l) { l.cancelled = nowTs(); await this._save(); }
+    return true;
+  }
+  async markSold({ listingId, buyer }) {
+    await this._load();
+    const l = await this.getListingById(listingId);
+    if (l) { l.soldAt = nowTs(); l.buyer = buyer || null; await this._save(); }
+    return true;
+  }
+  async getCollectionsWithMints() {
+    const cols = await this.getCollections();
+    return cols.map((c) => ({ id: c.id, name: c.name, symbol: c.symbol, image_gateway: c.image_gateway, mints: (this._db[c.id]?.mints || []).slice() }));
+  }
+}
+
 class SQLiteDB {
   constructor(Database) {
     this.db = new Database(DATA_SQLITE_PATH);
@@ -375,6 +537,19 @@ class SQLiteDB {
 let impl = null;
 export async function initDb() {
   if (impl) return impl;
+  // Prefer KV if configured (works on Vercel serverless)
+  const kvUrl = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+  const kvToken = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (kvUrl && kvToken) {
+    try {
+      impl = new KVDB({ url: kvUrl, token: kvToken, key: process.env.KV_KEY || 'bang:db' });
+      await impl.init();
+      return impl;
+    } catch (e) {
+      console.warn('[db] KV init failed, attempting SQLite/file fallback:', e?.message || e);
+      impl = null;
+    }
+  }
   let sqliteMod = null;
   try {
     sqliteMod = await import('better-sqlite3');
