@@ -9,7 +9,7 @@ import bs58 from 'bs58';
 // Use global fetch/FormData/Blob available in Node 18+
 import { Connection, Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction, SYSVAR_RENT_PUBKEY, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { tryHandleMarketRoute } from './marketplace.js';
-import { getDb } from './db.js';
+import { getDb, getDbType } from './db.js';
 import {
   TOKEN_PROGRAM_ID,
   MINT_SIZE,
@@ -205,7 +205,8 @@ function sendJson(res, code, obj) {
   const body = JSON.stringify(obj);
   res.writeHead(code, {
     'Content-Type': 'application/json',
-    'Content-Length': Buffer.byteLength(body)
+    'Content-Length': Buffer.byteLength(body),
+    'Cache-Control': 'no-store, max-age=0',
   });
   res.end(body);
 }
@@ -312,6 +313,11 @@ export async function handleRequest(req, res) {
     if (pathname === '/api/sol-price' && req.method === 'GET') {
       const usd = await getSolUsd();
       return sendJson(res, 200, { usd, source: 'coinmarketcap', cached: __solQuote && (Date.now() - __solQuote.ts) < 60_000 });
+    }
+    if (pathname === '/api/debug/db' && req.method === 'GET') {
+      // Returns which DB backend is active
+      await getDb();
+      return sendJson(res, 200, { backend: getDbType() });
     }
     // Marketplace routes (delegated to a separate module to avoid clutter)
     const maybeHandled = await tryHandleMarketRoute(req, res, pathname, query);
@@ -421,6 +427,33 @@ export async function handleRequest(req, res) {
       });
       const serialized = tx.serialize({ requireAllSignatures: false });
       return sendJson(res, 200, { tx: Buffer.from(serialized).toString('base64') });
+    }
+
+    // Atomic create-collection + build mint tx (avoids cross-request persistence issues)
+    if (pathname === '/api/deploy-and-mint' && req.method === 'POST') {
+      const body = await getParsedBody(req);
+      const { name, symbol, supply = 0, price = 0, imageCid, metadataUri, metadataGateway, owner, payer, mintPubkey } = body || {};
+      if (!name || !symbol || !metadataUri || !owner || !payer || !mintPubkey) {
+        return sendJson(res, 400, { error: 'name, symbol, metadataUri, owner, payer, mintPubkey required' });
+      }
+      const parsedSupply = Number(supply);
+      if (!Number.isInteger(parsedSupply) || parsedSupply < 10 || parsedSupply > 100000) {
+        return sendJson(res, 400, { error: 'supply must be an integer between 10 and 100000' });
+      }
+      const dbh = await getDb();
+      const id = await dbh.createCollection({ name, symbol, supply: parsedSupply, priceLamports: Math.round(Number(price || 0) * LAMPORTS_PER_SOL), imageCid, metadataUri, metadataGateway, owner });
+      const cfg = await dbh.getCollectionById(id);
+      const tx = await buildMintNftTx({
+        payer,
+        mintPubkey,
+        name: cfg.name || name,
+        symbol: cfg.symbol || symbol,
+        metadataUri: cfg.metadata_gateway || cfg.metadata_uri,
+        paymentLamports: Number(cfg.priceLamports || 0) || 0,
+        paymentTo: cfg.owner || null,
+      });
+      const serialized = tx.serialize({ requireAllSignatures: false });
+      return sendJson(res, 200, { id, tx: Buffer.from(serialized).toString('base64') });
     }
 
     // Build an UpdateMetadata tx to change the URI (e.g., to a gateway URL)

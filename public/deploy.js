@@ -106,17 +106,12 @@ window.addEventListener('DOMContentLoaded', () => {
             properties: { files: [{ uri: img.gateway, type: file.type || 'image/png' }] },
           }),
         });
-        const dep = await fetchJSON('/api/deploy/config', {
-          method: 'POST',
-          body: JSON.stringify({ name, symbol, supply, price, imageCid: img.imageCid, metadataUri: meta.metadataUri, metadataGateway: meta.gateway, owner: publicKey }),
-        });
-
-        // Wallet-signed mint (1/1)
+        // Wallet-signed mint (1/1) — atomically create collection and build tx
         const { Keypair, Transaction, Connection } = await import('https://esm.sh/@solana/web3.js@1.98.0');
         const mint = Keypair.generate();
-        const r = await fetchJSON('/api/tx/mint-nft', {
+        const r = await fetchJSON('/api/deploy-and-mint', {
           method: 'POST',
-          body: JSON.stringify({ id: dep.id, payer: publicKey, mintPubkey: mint.publicKey.toBase58() }),
+          body: JSON.stringify({ name, symbol, supply, price, imageCid: img.imageCid, metadataUri: meta.metadataUri, metadataGateway: meta.gateway, owner: publicKey, payer: publicKey, mintPubkey: mint.publicKey.toBase58() }),
         });
         const buf = Uint8Array.from(atob(r.tx), c => c.charCodeAt(0));
         const tx = Transaction.from(buf);
@@ -130,9 +125,9 @@ window.addEventListener('DOMContentLoaded', () => {
         } catch (e) {
           showToast('Network slow to confirm. Check explorer.', { title: 'Pending', variant: 'info', actions: [ { label: 'View on Explorer', onClick: async () => window.open(await txExplorerUrl(sig), '_blank') } ] });
         }
-        await fetchJSON('/api/record-mint', { method: 'POST', body: JSON.stringify({ id: dep.id, mint: mint.publicKey.toBase58(), minter: publicKey, ts: Math.floor(Date.now()/1000) }) });
+        await fetchJSON('/api/record-mint', { method: 'POST', body: JSON.stringify({ id: r.id, mint: mint.publicKey.toBase58(), minter: publicKey, ts: Math.floor(Date.now()/1000) }) });
         const short = `${sig.slice(0, 6)}...${sig.slice(-6)}`;
-        const toast = showToast(`ID: ${dep.id}<br/>Tx: ${short}<br/><br/>Redirecting to Mint in <span id="depCountdown">5</span>s…`, {
+        const toast = showToast(`ID: ${r.id}<br/>Tx: ${short}<br/><br/>Redirecting to Mint in <span id="depCountdown">5</span>s…`, {
           title: 'Deployed + Minted 1/1',
           variant: 'success',
           actions: [
@@ -151,9 +146,9 @@ window.addEventListener('DOMContentLoaded', () => {
         const body = document.getElementById('deploySuccessBody');
         if (sec && body) {
           sec.style.display = '';
-          body.innerHTML = `Your collection was created. ID: <code>${dep.id}</code>`;
+          body.innerHTML = `Your collection was created. ID: <code>${r.id}</code>`;
           const copyBtn = document.getElementById('copyDeployId');
-          if (copyBtn) copyBtn.onclick = () => navigator.clipboard?.writeText(dep.id);
+          if (copyBtn) copyBtn.onclick = () => navigator.clipboard?.writeText(r.id);
         }
       } catch (err) {
         console.error(err);

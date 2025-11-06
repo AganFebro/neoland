@@ -535,6 +535,13 @@ class SQLiteDB {
 }
 
 let impl = null;
+export function getDbType() {
+  if (!impl) return 'uninitialized';
+  if (impl instanceof KVDB) return 'kv';
+  // best-effort detection for SQLite class name
+  if (impl.constructor && /SQLiteDB/.test(impl.constructor.name)) return 'sqlite';
+  return 'file';
+}
 export async function initDb() {
   if (impl) return impl;
   // Prefer KV if configured (works on Vercel serverless)
