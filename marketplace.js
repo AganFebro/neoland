@@ -1,10 +1,27 @@
 import path from 'path';
-import { Connection, PublicKey } from '@solana/web3.js';
+import { Connection, PublicKey, Keypair } from '@solana/web3.js';
+import bs58 from 'bs58';
 import { createHash } from 'crypto';
 import { getDb } from './db.js';
 
 const RPC = process.env.CARV_RPC || process.env.CARV_SVM_RPC || 'https://rpc.testnet.carv.io/rpc';
 const conn = new Connection(RPC, 'confirmed');
+const deployer = process.env.PRIVATE_KEY_BASE58 ? Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY_BASE58)) : null;
+const CARV_MINT = (process.env.CARV_MINT || 'D7WVEw9Pkf4dfCCE3fwGikRCCTvm9ipqTYPHRENLiw3s');
+
+function assertMinPrice({ isSpl, currencyMint, priceLamports, priceAmount }) {
+  if (!isSpl) {
+    if (Number(priceLamports || 0) < 3_000_000) {
+      throw new Error('minimum price is 0.003 SOL');
+    }
+    return;
+  }
+  if (currencyMint && String(currencyMint) === String(CARV_MINT)) {
+    if (Number(priceAmount || 0) < 1_000_000_000) {
+      throw new Error('minimum price is 1 CARV');
+    }
+  }
+}
 
 function sendJson(res, code, obj) {
   const body = JSON.stringify(obj);
@@ -114,6 +131,18 @@ export async function tryHandleMarketRoute(req, res, pathname, query) {
       return sendJson(res, 200, { listings });
     }
 
+    // GET /api/market/offers
+    if (pathname === '/api/market/offers' && req.method === 'GET') {
+      const { collectionId, bidder } = query || {};
+      const dbh = await getDb();
+      try {
+        const offers = await dbh.getOffers({ collectionId, bidder, activeOnly: true });
+        return sendJson(res, 200, { offers });
+      } catch (e) {
+        return sendJson(res, 501, { error: 'offers not supported on this backend' });
+      }
+    }
+
     // GET /api/market/activity?collectionId=
     if (pathname === '/api/market/activity' && req.method === 'GET') {
       const { collectionId } = query || {};
@@ -121,16 +150,82 @@ export async function tryHandleMarketRoute(req, res, pathname, query) {
       const dbh = await getDb();
       const cfg = await dbh.getCollectionById(collectionId);
       if (!cfg) return sendJson(res, 404, { error: 'collection not found' });
-      const all = await dbh.getListings({ collectionId, activeOnly: false });
-      const sales = all
+      const allListings = await dbh.getListings({ collectionId, activeOnly: false });
+      const sales = allListings
         .filter((l) => l.soldAt && !l.cancelled)
         .map((l) => ({ type: 'sale', ts: Number(l.soldAt) || 0, mint: l.mint, priceLamports: Number(l.priceLamports || 0), seller: l.seller || null, buyer: l.buyer || null }));
+      // Listing created / cancelled events
+      const listCreated = allListings.map((l) => ({ type: 'list', ts: Number(l.createdAt) || 0, mint: l.mint, priceLamports: Number(l.priceLamports || 0), seller: l.seller || null }));
+      const listCancelled = allListings
+        .filter((l) => l.cancelled)
+        .map((l) => ({ type: 'list_cancel', ts: Number(l.cancelled) || 0, mint: l.mint, priceLamports: Number(l.priceLamports || 0), seller: l.seller || null }));
       const mints = Array.isArray(cfg.mints)
         ? cfg.mints.map((m) => ({ type: 'mint', ts: 0, mint: m, minter: null }))
         : [];
-      const events = [...(Array.isArray(cfg.mintEvents) ? cfg.mintEvents.map((m) => ({ type: 'mint', ts: Number(m.ts) || 0, mint: m.mint, minter: m.minter || null })) : mints), ...sales]
+      // Offers (created / cancelled)
+      let offerCreated = [];
+      let offerCancelled = [];
+      // If activity log exists, prefer that for offers
+      if (typeof dbh.getActivityForCollection === 'function') {
+        try { offerCreated = (await dbh.getActivityForCollection({ collectionId, type: 'offer_created' })) || []; } catch {}
+        try { offerCancelled = (await dbh.getActivityForCollection({ collectionId, type: 'offer_cancelled' })) || []; } catch {}
+      }
+      if (!offerCreated.length && !offerCancelled.length) {
+        try {
+          const offersAll = await dbh.getOffers({ collectionId, activeOnly: false });
+          offerCreated = offersAll.map((o) => ({ type: 'offer_created', ts: Number(o.createdAt) || 0, priceLamports: Number(o.priceLamports || 0), bidder: o.bidder || null }));
+          offerCancelled = offersAll.filter((o) => o.cancelled).map((o) => ({ type: 'offer_cancelled', ts: Number(o.cancelled) || 0, priceLamports: Number(o.priceLamports || 0), bidder: o.bidder || null }));
+        } catch {}
+      }
+      // Offer accepted — optional, only if supported by DB
+      let accepted = [];
+      if (typeof dbh.getActivityForCollection === 'function') {
+        try { accepted = (await dbh.getActivityForCollection({ collectionId, type: 'offer_accepted' })) || []; } catch { accepted = []; }
+      }
+      const events = [
+        ...(Array.isArray(cfg.mintEvents) ? cfg.mintEvents.map((m) => ({ type: 'mint', ts: Number(m.ts) || 0, mint: m.mint, minter: m.minter || null })) : mints),
+        ...listCreated,
+        ...listCancelled,
+        ...offerCreated,
+        ...offerCancelled,
+        ...accepted,
+        ...sales,
+      ]
         .sort((a, b) => (Number(b.ts) || 0) - (Number(a.ts) || 0));
       return sendJson(res, 200, { events });
+    }
+
+    // POST /api/market/activity/offer-created
+    if (pathname === '/api/market/activity/offer-created' && req.method === 'POST') {
+      const body = await getParsedBody(req);
+      const { collectionId, bidder, priceLamports, ts } = body || {};
+      if (!collectionId || !bidder || !priceLamports) return sendJson(res, 400, { error: 'collectionId, bidder, priceLamports required' });
+      const dbh = await getDb();
+      if (typeof dbh.addActivity !== 'function') return sendJson(res, 501, { error: 'activity logging not supported' });
+      await dbh.addActivity({ collectionId, type: 'offer_created', ts: Number(ts) || nowTs(), priceLamports: Number(priceLamports || 0), actor1: bidder });
+      return sendJson(res, 200, { ok: true });
+    }
+
+    // POST /api/market/activity/offer-cancelled
+    if (pathname === '/api/market/activity/offer-cancelled' && req.method === 'POST') {
+      const body = await getParsedBody(req);
+      const { collectionId, bidder, priceLamports, ts } = body || {};
+      if (!collectionId || !bidder) return sendJson(res, 400, { error: 'collectionId, bidder required' });
+      const dbh = await getDb();
+      if (typeof dbh.addActivity !== 'function') return sendJson(res, 501, { error: 'activity logging not supported' });
+      await dbh.addActivity({ collectionId, type: 'offer_cancelled', ts: Number(ts) || nowTs(), priceLamports: Number(priceLamports || 0), actor1: bidder });
+      return sendJson(res, 200, { ok: true });
+    }
+
+    // POST /api/market/activity/offer-accepted
+    if (pathname === '/api/market/activity/offer-accepted' && req.method === 'POST') {
+      const body = await getParsedBody(req);
+      const { collectionId, bidder, seller, mint, priceLamports, ts } = body || {};
+      if (!collectionId || !bidder || !seller || !priceLamports) return sendJson(res, 400, { error: 'collectionId, bidder, seller, priceLamports required' });
+      const dbh = await getDb();
+      if (typeof dbh.addActivity !== 'function') return sendJson(res, 501, { error: 'activity logging not supported' });
+      await dbh.addActivity({ collectionId, type: 'offer_accepted', ts: Number(ts) || nowTs(), mint: mint || null, priceLamports: Number(priceLamports || 0), actor1: seller, actor2: bidder });
+      return sendJson(res, 200, { ok: true });
     }
 
     // GET /api/market/stats?collectionId=
@@ -152,10 +247,10 @@ export async function tryHandleMarketRoute(req, res, pathname, query) {
       });
     }
 
-    // POST /api/market/list  { mint, collectionId, seller, priceSol }
+    // POST /api/market/list  { mint, collectionId, seller, priceSol? , currencyMint?, priceAmount? }
     if (pathname === '/api/market/list' && req.method === 'POST') {
       const body = await getParsedBody(req);
-      const { mint, collectionId, seller, priceSol } = body || {};
+      const { mint, collectionId, seller, priceSol, currencyMint, priceAmount } = body || {};
       if (!mint || !collectionId || !seller) return sendJson(res, 400, { error: 'mint, collectionId, seller required' });
       const dbh = await getDb();
       const cfg = await dbh.getCollectionById(collectionId);
@@ -168,32 +263,41 @@ export async function tryHandleMarketRoute(req, res, pathname, query) {
         const inEscrow = await escrowHasNft(mint);
         if (!inEscrow) return sendJson(res, 400, { error: 'seller does not own this NFT' });
       }
-      const priceLamports = priceSol != null ? lamportsFrom(priceSol) : 0;
-      const { id } = await dbh.createListing({ mint, collectionId, seller, priceLamports });
-      const listing = { id, mint, collectionId, seller, priceLamports, createdAt: nowTs() };
+      // Determine currency and price storage (back-compat: priceLamports for SOL)
+      const isSpl = !!currencyMint;
+      const priceLamports = !isSpl && priceSol != null ? lamportsFrom(priceSol) : 0;
+      const priceAmt = isSpl ? Number(priceAmount || 0) : priceLamports;
+      try { assertMinPrice({ isSpl, currencyMint, priceLamports, priceAmount: priceAmt }); } catch (e) { return sendJson(res, 400, { error: String(e.message || e) }); }
+      const { id } = await dbh.createListing({ mint, collectionId, seller, priceLamports, currencyMint: currencyMint || null, priceAmount: priceAmt });
+      const listing = { id, mint, collectionId, seller, priceLamports, currencyMint: currencyMint || null, priceAmount: priceAmt, createdAt: nowTs() };
       return sendJson(res, 200, { id, listing });
     }
 
     // Build on-chain transactions for the custom program (list/buy/cancel)
     if (pathname === '/api/market/tx/list' && req.method === 'POST') {
       const body = await getParsedBody(req);
-      const { mint, seller, priceSol } = body || {};
+      const { mint, seller, priceSol, currencyMint, priceAmount } = body || {};
       if (!process.env.MARKET_PROGRAM_ID) return sendJson(res, 400, { error: 'MARKET_PROGRAM_ID not set' });
       if (!mint || !seller) return sendJson(res, 400, { error: 'mint and seller required' });
       const programId = new PublicKey(process.env.MARKET_PROGRAM_ID);
       const mintPk = new PublicKey(mint);
       const sellerPk = new PublicKey(seller);
       const listingPda = PublicKey.findProgramAddressSync([Buffer.from('listing'), mintPk.toBuffer()], programId)[0];
-      const { getAssociatedTokenAddress } = await import('@solana/spl-token');
+      const { getAssociatedTokenAddress, createAssociatedTokenAccountInstruction } = await import('@solana/spl-token');
       const sellerAta = await getAssociatedTokenAddress(mintPk, sellerPk);
       const escrowAta = await getAssociatedTokenAddress(mintPk, listingPda, true);
+      const isSpl = !!currencyMint;
       const priceLamports = Math.round(Number(priceSol || 0) * 1_000_000_000);
+      const priceAmt = isSpl ? Number(priceAmount || 0) : priceLamports;
+      try { assertMinPrice({ isSpl, currencyMint, priceLamports, priceAmount: priceAmt }); } catch (e) { return sendJson(res, 400, { error: String(e.message || e) }); }
 
-      // Anchor discriminator for global:list + u64 price
+      // Anchor discriminator for global:list + u64 price + Pubkey payment_mint
       const disc = createHash('sha256').update('global:list').digest().subarray(0,8);
-      const data = Buffer.alloc(8 + 8);
+      const data = Buffer.alloc(8 + 8 + 32);
       disc.copy(data, 0);
-      data.writeBigUInt64LE(BigInt(priceLamports), 8);
+      data.writeBigUInt64LE(BigInt(priceAmt), 8);
+      const payMint = isSpl ? new PublicKey(currencyMint) : new PublicKey('11111111111111111111111111111111');
+      Buffer.from(payMint.toBuffer()).copy(data, 16);
 
       const keys = [
         { pubkey: sellerPk, isSigner: true, isWritable: true },
@@ -260,7 +364,13 @@ export async function tryHandleMarketRoute(req, res, pathname, query) {
       const listing = await dbh.getListingById(listingId);
       if (!listing) return sendJson(res, 404, { error: 'listing not found or inactive' });
       if (listing.cancelled || listing.soldAt) return sendJson(res, 404, { error: 'listing not found or inactive' });
+      // Block buys when collection trading is paused
+      try {
+        const coll = await dbh.getCollectionById(listing.collectionId);
+        if (coll && coll.tradingPaused) return sendJson(res, 403, { error: 'trading paused by owner' });
+      } catch {}
       if (String(listing.seller) === String(buyer)) return sendJson(res, 400, { error: 'buyer cannot be the seller' });
+      if (listing.currencyMint) return sendJson(res, 400, { error: 'use buy-spl for token-settled listing' });
 
       const programId = new PublicKey(process.env.MARKET_PROGRAM_ID);
       const mintPk = new PublicKey(listing.mint);
@@ -298,6 +408,76 @@ export async function tryHandleMarketRoute(req, res, pathname, query) {
       return sendJson(res, 200, { tx: Buffer.from(serialized).toString('base64') });
     }
 
+    // SPL-token buy path
+    if (pathname === '/api/market/tx/buy-spl' && req.method === 'POST') {
+      const body = await getParsedBody(req);
+      const { listingId, buyer } = body || {};
+      if (!process.env.MARKET_PROGRAM_ID) return sendJson(res, 400, { error: 'MARKET_PROGRAM_ID not set' });
+      if (!listingId || !buyer) return sendJson(res, 400, { error: 'listingId and buyer required' });
+      const dbh = await getDb();
+      const listing = await dbh.getListingById(listingId);
+      if (!listing) return sendJson(res, 404, { error: 'listing not found or inactive' });
+      if (listing.cancelled || listing.soldAt) return sendJson(res, 404, { error: 'listing not found or inactive' });
+      // Block buys when collection trading is paused
+      try {
+        const coll = await dbh.getCollectionById(listing.collectionId);
+        if (coll && coll.tradingPaused) return sendJson(res, 403, { error: 'trading paused by owner' });
+      } catch {}
+      if (String(listing.seller) === String(buyer)) return sendJson(res, 400, { error: 'buyer cannot be the seller' });
+      if (!listing.currencyMint) return sendJson(res, 400, { error: 'listing currency is SOL; use buy' });
+
+      const programId = new PublicKey(process.env.MARKET_PROGRAM_ID);
+      const mintPk = new PublicKey(listing.mint);
+      const paymentMintPk = new PublicKey(listing.currencyMint);
+      const sellerPk = new PublicKey(listing.seller);
+      const buyerPk = new PublicKey(buyer);
+      const stillAvailable = await escrowHasNft(listing.mint);
+      if (!stillAvailable) return sendJson(res, 410, { error: 'listing no longer available' });
+      const listingPda = PublicKey.findProgramAddressSync([Buffer.from('listing'), mintPk.toBuffer()], programId)[0];
+      const { getAssociatedTokenAddress } = await import('@solana/spl-token');
+      const buyerAta = await getAssociatedTokenAddress(mintPk, buyerPk);
+      const escrowAta = await getAssociatedTokenAddress(mintPk, listingPda, true);
+      const buyerPayAta = await getAssociatedTokenAddress(paymentMintPk, buyerPk);
+      const sellerPayAta = await getAssociatedTokenAddress(paymentMintPk, sellerPk);
+
+      // Anchor discriminator for global:buy_spl
+      const data = createHash('sha256').update('global:buy_spl').digest().subarray(0,8);
+      const keys = [
+        { pubkey: buyerPk, isSigner: true, isWritable: true },
+        { pubkey: sellerPk, isSigner: false, isWritable: true },
+        { pubkey: mintPk, isSigner: false, isWritable: false },
+        { pubkey: listingPda, isSigner: false, isWritable: true },
+        { pubkey: escrowAta, isSigner: false, isWritable: true },
+        { pubkey: buyerAta, isSigner: false, isWritable: true },
+        { pubkey: paymentMintPk, isSigner: false, isWritable: false },
+        { pubkey: buyerPayAta, isSigner: false, isWritable: true },
+        { pubkey: sellerPayAta, isSigner: false, isWritable: true },
+        { pubkey: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'), isSigner: false, isWritable: false },
+        { pubkey: new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL'), isSigner: false, isWritable: false },
+        { pubkey: new PublicKey('11111111111111111111111111111111'), isSigner: false, isWritable: false },
+      ];
+      const { Transaction, PublicKey: _PK } = await import('@solana/web3.js');
+      const { createAssociatedTokenAccountInstruction } = await import('@solana/spl-token');
+      const ix = new (await import('@solana/web3.js')).TransactionInstruction({ programId, keys, data });
+      const tx = new Transaction();
+      tx.feePayer = buyerPk;
+      // Ensure payment ATAs exist; create with deployer as payer if available
+      let needsDeployerSig = false;
+      const [buyerPayInfo, sellerPayInfo] = await Promise.all([
+        conn.getAccountInfo(buyerPayAta),
+        conn.getAccountInfo(sellerPayAta),
+      ]);
+      const payerForAta = deployer ? deployer.publicKey : buyerPk;
+      if (!buyerPayInfo) { tx.add(createAssociatedTokenAccountInstruction(payerForAta, buyerPayAta, buyerPk, paymentMintPk)); needsDeployerSig = needsDeployerSig || !!deployer; }
+      if (!sellerPayInfo) { tx.add(createAssociatedTokenAccountInstruction(payerForAta, sellerPayAta, sellerPk, paymentMintPk)); needsDeployerSig = needsDeployerSig || !!deployer; }
+      tx.add(ix);
+      const { blockhash } = await conn.getLatestBlockhash('finalized');
+      tx.recentBlockhash = blockhash;
+      if (needsDeployerSig) { try { tx.partialSign(deployer); } catch {} }
+      const serialized = tx.serialize({ requireAllSignatures: false });
+      return sendJson(res, 200, { tx: Buffer.from(serialized).toString('base64') });
+    }
+
     // POST /api/market/sold { listingId, buyer }
     if (pathname === '/api/market/sold' && req.method === 'POST') {
       const body = await getParsedBody(req);
@@ -317,6 +497,38 @@ export async function tryHandleMarketRoute(req, res, pathname, query) {
 
       await dbh.markSold({ listingId, buyer });
       return sendJson(res, 200, { ok: true });
+    }
+
+    // POST /api/market/offer  { collectionId, bidder, priceSol }
+    if (pathname === '/api/market/offer' && req.method === 'POST') {
+      const body = await getParsedBody(req);
+      const { collectionId, bidder, priceSol } = body || {};
+      if (!collectionId || !bidder) return sendJson(res, 400, { error: 'collectionId and bidder required' });
+      const dbh = await getDb();
+      const cfg = await dbh.getCollectionById(collectionId);
+      if (!cfg) return sendJson(res, 404, { error: 'collection not found' });
+      const priceLamports = lamportsFrom(priceSol);
+      if (!priceLamports || priceLamports <= 0) return sendJson(res, 400, { error: 'price must be > 0' });
+      try {
+        const { id } = await dbh.createOffer({ collectionId, bidder, priceLamports });
+        return sendJson(res, 200, { id });
+      } catch (e) {
+        return sendJson(res, 501, { error: 'offers not supported on this backend' });
+      }
+    }
+
+    // POST /api/market/offer/cancel { offerId, bidder }
+    if (pathname === '/api/market/offer/cancel' && req.method === 'POST') {
+      const body = await getParsedBody(req);
+      const { offerId, bidder } = body || {};
+      if (!offerId) return sendJson(res, 400, { error: 'offerId required' });
+      const dbh = await getDb();
+      try {
+        await dbh.cancelOffer({ offerId, bidder });
+        return sendJson(res, 200, { ok: true });
+      } catch {
+        return sendJson(res, 501, { error: 'offers not supported on this backend' });
+      }
     }
 
     // POST /api/market/cancel { listingId, seller }

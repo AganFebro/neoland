@@ -1,7 +1,8 @@
 import { fetchJSON, connectBackpack, showToast, getConfig, txExplorerUrl, waitForConfirmation, sendAndTrack, setImgSrc } from '/common.js';
 
 const PAGE_SIZE = 6;
-const state = { collections: [], solUsd: null, page: 1, filter: '' };
+const CARV_MINT = 'D7WVEw9Pkf4dfCCE3fwGikRCCTvm9ipqTYPHRENLiw3s';
+const state = { collections: [], solUsd: null, carvUsd: null, carvPerSol: null, page: 1, filter: '' };
 
 function renderPager(container, totalPages, current, onPage) {
   if (!container) return;
@@ -17,14 +18,20 @@ function renderPager(container, totalPages, current, onPage) {
   }
 }
 
+function slugify(s) { return (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, ''); }
+
 async function loadCollections() {
   const wrap = document.getElementById('mintCollections');
   wrap.innerHTML = '<div class="skeleton block"></div><div class="skeleton text"></div>';
-  const [{ collections }, priceResp] = await Promise.all([
+  const [{ collections }, priceResp, prAll] = await Promise.all([
     fetchJSON('/api/collections'),
     fetch('/api/sol-price').then(r => r.ok ? r.json() : {}).catch(() => ({})),
+    fetch('/api/prices').then(r => r.ok ? r.json() : {}).catch(() => ({})),
   ]);
   state.solUsd = typeof priceResp.usd === 'number' ? priceResp.usd : null;
+  if (typeof prAll.solUsd === 'number') state.solUsd = prAll.solUsd;
+  if (typeof prAll.carvUsd === 'number') state.carvUsd = prAll.carvUsd;
+  if (typeof prAll.carvPerSol === 'number') state.carvPerSol = prAll.carvPerSol;
   const visible = (collections || []).filter((c) => {
     const sup = Number(c.supply || 0);
     const minted = Number(c.minted_count || 0);
@@ -47,17 +54,21 @@ function renderMint() {
   slice.forEach((c) => {
     const el = document.createElement('div');
     el.className = 'nft';
+    const lamports = Number(c.priceLamports || 0);
+    const sol = lamports / 1_000_000_000;
+    const usdTxt = state.solUsd ? `• ≈ $${(sol * state.solUsd).toFixed(2)}` : '';
+    const carvTxt = state.carvPerSol ? `• ≈ ${(sol * state.carvPerSol).toFixed(2)} CARV` : '';
+    const priceText = lamports <= 0 ? 'Free' : `${sol} SOL ${carvTxt ? carvTxt : ''} ${usdTxt ? usdTxt : ''}`.replace(/\s+/g,' ').trim();
     el.innerHTML = `
-      <img alt="${c.name}" loading="lazy" />
-      <div class="meta"><strong>${c.name}</strong> <span>(${c.symbol})</span></div>
-      <div class="meta">Price: ${(c.priceLamports || 0) / 1_000_000_000} SOL ${state.solUsd ? `(\$${(((c.priceLamports||0)/1_000_000_000)*state.solUsd).toFixed(2)})` : ''}</div>
+      <a class="block" href="/mint/${slugify(c.name || c.symbol || c.id)}-${c.id}"><img alt="${c.name}" loading="lazy" /></a>
+      <div class="meta"><a href="/mint/${slugify(c.name || c.symbol || c.id)}-${c.id}"><strong>${c.name}</strong></a> <span>(${c.symbol})</span></div>
+      <div class="meta">Price: ${priceText}</div>
       <div class="meta">Minted: ${c.minted_count || 0}/${c.supply || 0}</div>
       <div class="row gap mt">
-        <button class="btn" data-id="${c.id}">Mint to Me</button>
+        <a class="btn" href="/mint/${slugify(c.name || c.symbol || c.id)}-${c.id}">Details</a>
       </div>
     `;
     setImgSrc(el.querySelector('img'), c.image);
-    el.querySelector('button').onclick = (ev) => handleMintClientTx(ev, c.id);
     wrap.appendChild(el);
   });
   const anchor = document.getElementById('mintCollections');
@@ -89,7 +100,22 @@ async function handleMintClientTx(ev, id) {
     } catch (err) {
       // Fallback to legacy flow
       const mint = Keypair.generate();
-      const r = await fetchJSON('/api/tx/mint-nft', { method: 'POST', body: JSON.stringify({ id, payer: publicKey, mintPubkey: mint.publicKey.toBase58() }) });
+      // Choose currency: default SOL; offer CARV based on live rates
+      let currencyMint = null;
+      try {
+        const p = await fetch('/api/prices').then(r => r.ok ? r.json() : {});
+        const solUsd = typeof p.solUsd === 'number' ? p.solUsd : null;
+        const carvUsd = typeof p.carvUsd === 'number' ? p.carvUsd : null;
+        if (solUsd && carvUsd) {
+          const coll = state.collections.find((x) => x.id === id);
+          const sol = Number(coll?.priceLamports || 0) / 1_000_000_000;
+          const usd = sol * solUsd;
+          const carv = usd / carvUsd;
+          const ok = window.confirm(`Pay with CARV instead of SOL?\n≈ ${carv.toFixed(2)} CARV`);
+          if (ok) currencyMint = CARV_MINT;
+        }
+      } catch {}
+      const r = await fetchJSON('/api/tx/mint-nft', { method: 'POST', body: JSON.stringify({ id, payer: publicKey, mintPubkey: mint.publicKey.toBase58(), currencyMint }) });
       const buf = Uint8Array.from(atob(r.tx), c => c.charCodeAt(0));
       const tx = Transaction.from(buf);
       tx.partialSign(mint);

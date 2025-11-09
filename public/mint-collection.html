@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>neoland • Mint Collection</title>
+    <script>
+      (function(){
+        try {
+          var t = localStorage.getItem('theme');
+          if (t !== 'dark' && t !== 'light') {
+            t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+          }
+          document.documentElement.setAttribute('data-theme', t);
+        } catch {}
+      })();
+    </script>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="page-mint-coll">
+    <header class="nb-header">
+      <div class="container row between center">
+        <h1 class="logo">neoland</h1>
+        <nav class="nav">
+          <a href="/" class="nav-link">Home</a>
+          <a href="/deploy" class="nav-link">Deploy</a>
+          <a href="/mint" class="nav-link active">Mint</a>
+          <a href="/market" class="nav-link">Market</a>
+        </nav>
+        <div class="row gap center">
+          <span id="networkBadge" class="badge" title="Network"></span>
+          <button id="themeToggle" class="btn btn-ghost" aria-label="Toggle dark mode" title="Dark mode">🌙</button>
+          <button id="connectBtn" class="btn btn-accent">Connect Backpack</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="container">
+      <section class="card">
+        <span class="badge-sticker">MINT</span>
+        <div class="toolbar">
+          <div class="stack">
+            <h3 id="collTitle" class="subtitle">Collection</h3>
+            <div id="collMeta" class="small muted"></div>
+            <div id="collOwner" class="small muted"></div>
+            <div id="statsRow" class="stats-row mt">
+              <div class="stat"><div class="label">Floor</div><div class="value" id="statFloor">—</div><div class="sub" id="statFloorUsd"></div></div>
+              <div class="stat"><div class="label">Top Offer</div><div class="value" id="statOffer">—</div><div class="sub" id="statOfferUsd"></div></div>
+              <div class="stat"><div class="label">24H Volume</div><div class="value" id="statVol24">—</div><div class="sub" id="statVol24Usd"></div></div>
+              <div class="stat"><div class="label">Total Volume</div><div class="value" id="statVolTotal">—</div><div class="sub" id="statVolTotalUsd"></div></div>
+            </div>
+          </div>
+          <div class="row gap">
+            <a id="viewMarketBtn" class="btn btn-ghost" href="#">View on Market</a>
+          </div>
+        </div>
+
+        <div class="mc-wrap">
+          <div class="mc-media">
+            <div class="media-frame">
+              <img id="heroImg" alt="Artwork" loading="lazy" />
+            </div>
+            <div id="mintedThumbs" class="row gap mt wrap mc-thumbs"></div>
+            <section class="card mt mc-live">
+              <div class="subtitle">Live Mints</div>
+              <div id="liveMints" class="mt"></div>
+            </section>
+          </div>
+          <div class="mc-side">
+            <div class="card" style="box-shadow:none">
+              <div class="row between center">
+                <div>
+                  <div id="mintTitle" class="subtitle">Mint</div>
+                  <div id="mintedCount" class="muted small">—</div>
+                </div>
+                <div class="row gap center">
+                  <button id="qtyMinus" class="btn btn-ghost" aria-label="Decrease">−</button>
+                  <div id="qty" class="badge" aria-live="polite">1</div>
+                  <button id="qtyPlus" class="btn btn-ghost" aria-label="Increase">+</button>
+                </div>
+              </div>
+              <div class="mt">
+                <div id="priceRow" class="meta"></div>
+                <div class="row gap mt" aria-label="Choose currency">
+                  <div class="pill">Pay with</div>
+                  <button id="paySOL" class="btn">SOL</button>
+                  <button id="payCARV" class="btn btn-ghost">CARV</button>
+                </div>
+                <div id="mintWindowNote" class="small muted mt"></div>
+              </div>
+              <div class="row gap mt">
+                <button id="mintNow" class="btn">Mint</button>
+              </div>
+            </div>
+
+            
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="container muted small center mt">Participating in CARV Hackathon, website may be unstable.</footer>
+
+    <script type="module" src="/mint-collection.js?v=1"></script>
+  </body>
+  </html>

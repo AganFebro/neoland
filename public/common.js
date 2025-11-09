@@ -9,6 +9,8 @@ export async function fetchJSON(url, opts) {
 let __cfg;
 let __provider; // last connected Backpack provider
 let __walletPopover;
+let __walletMenu;
+let __hoverTimer;
 export async function getConfig() {
   if (__cfg) return __cfg;
   try {
@@ -230,6 +232,92 @@ export async function showWalletPopover() {
   });
 }
 
+function closeWalletMenu(immediate = false) {
+  if (!__walletMenu) return;
+  const el = __walletMenu;
+  const remove = () => { if (el === __walletMenu) { el.remove(); __walletMenu = null; } };
+  window.removeEventListener('scroll', scheduleCloseWalletMenu, true);
+  window.removeEventListener('resize', scheduleCloseWalletMenu, true);
+  clearTimeout(__hoverTimer);
+  if (immediate) { remove(); return; }
+  el.classList.remove('open');
+  el.classList.add('closing');
+  setTimeout(remove, 160);
+}
+
+function scheduleCloseWalletMenu() {
+  clearTimeout(__hoverTimer);
+  __hoverTimer = setTimeout(() => closeWalletMenu(), 200);
+}
+
+export async function showWalletMenu() {
+  const btn = document.getElementById('connectBtn');
+  if (!btn) return;
+  if (__walletMenu) { return; }
+  const pk = __provider?.publicKey?.toString?.() || __provider?.publicKey || btn.textContent?.replace('Connect Backpack','').trim();
+  const short = pk && pk.length > 14 ? `${pk.slice(0, 6)}...${pk.slice(-6)}` : (pk || 'Wallet');
+
+  const menu = document.createElement('div');
+  menu.className = 'wallet-menu open';
+  menu.setAttribute('role', 'menu');
+  menu.innerHTML = `
+    <div class="wm-header">
+      <div class="wm-addr" id="wmAddr" title="Go to Collection">${short}</div>
+      <button class="btn btn-ghost wm-copy" id="wmCopy" title="Copy address">Copy</button>
+    </div>
+    <div class="wm-section">
+      <div class="wm-row">
+        <button class="btn" id="wmLinkWallet" title="Link another wallet" disabled>Link Wallet</button>
+        <button class="btn btn-ghost" id="wmTwitter" title="Sign in with X/Twitter" disabled>X / Twitter</button>
+      </div>
+    </div>
+    <ul class="wm-list">
+      <li id="wmProfile" role="menuitem">Profile</li>
+      <li id="wmManage" role="menuitem" style="display:none">Manage Collections</li>
+      <li id="wmSettings" role="menuitem">Account Settings</li>
+      <li id="wmRewards" role="menuitem">Rewards</li>
+    </ul>
+    <div class="wm-footer">
+      <button class="btn" id="wmLogout">Log out</button>
+    </div>
+  `;
+  document.body.appendChild(menu);
+  __walletMenu = menu;
+
+  // Position near top-right/right edge; CSS anchors to right:16px, top ~ header height
+  // Hover logic
+  clearTimeout(__hoverTimer);
+  const keepOpen = () => { clearTimeout(__hoverTimer); };
+  btn.addEventListener('mouseleave', scheduleCloseWalletMenu);
+  menu.addEventListener('mouseenter', keepOpen);
+  menu.addEventListener('mouseleave', scheduleCloseWalletMenu);
+  window.addEventListener('scroll', scheduleCloseWalletMenu, { passive: true, capture: true });
+  window.addEventListener('resize', scheduleCloseWalletMenu, { passive: true });
+
+  // Handlers
+  const goCollection = () => { try { window.location.href = '/collection'; } catch(e) { console.error(e); } };
+  menu.querySelector('#wmAddr')?.addEventListener('click', goCollection);
+  menu.querySelector('#wmProfile')?.addEventListener('click', goCollection);
+  // Conditionally show Manage if wallet is a collection owner
+  (async () => {
+    try {
+      const j = await fetchJSON('/api/collections');
+      const owns = (j.collections || []).some((c) => String(c.owner) === String(pk));
+      if (owns) {
+        const m = menu.querySelector('#wmManage');
+        if (m) {
+          m.style.display = '';
+          m.addEventListener('click', () => { window.location.href = '/manage'; });
+        }
+      }
+    } catch {}
+  })();
+  menu.querySelector('#wmCopy')?.addEventListener('click', () => { if (pk) navigator.clipboard?.writeText(pk); });
+  menu.querySelector('#wmSettings')?.addEventListener('click', (e) => e.preventDefault());
+  menu.querySelector('#wmRewards')?.addEventListener('click', (e) => e.preventDefault());
+  menu.querySelector('#wmLogout')?.addEventListener('click', async () => { try { await disconnectBackpack(); } catch {} closeWalletMenu(true); });
+}
+
 export async function connectBackpack(opts = {}) {
   const provider = await waitForProvider(2500);
   if (!provider) {
@@ -318,12 +406,23 @@ window.addEventListener('DOMContentLoaded', () => {
   const btn = document.getElementById('connectBtn');
   if (btn) btn.addEventListener('click', async (e) => {
     if (btn.classList.contains('btn-ghost')) {
-      // Already connected: toggle wallet popover
-      await showWalletPopover();
+      // Already connected: toggle wallet menu on click as well
+      if (__walletMenu) { closeWalletMenu(); } else { await showWalletMenu(); }
     } else {
       await connectBackpack();
     }
   });
+  // Hover to open wallet menu when connected
+  if (btn) btn.addEventListener('mouseenter', async () => {
+    if (btn.classList.contains('btn-ghost')) { await showWalletMenu(); }
+  });
+  document.addEventListener('click', (e) => {
+    if (!__walletMenu) return;
+    const btn = document.getElementById('connectBtn');
+    if (e.target && (__walletMenu.contains(e.target) || (btn && btn.contains(e.target)))) return;
+    closeWalletMenu();
+  }, true);
+  // Listeners are cleaned inside closeWalletMenu
   // Attempt silent reconnect if user connected before
   if (localStorage.getItem('autoconnect') === '1') {
     connectBackpack({ silent: true }).catch(() => {});

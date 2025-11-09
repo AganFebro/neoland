@@ -26,7 +26,6 @@
           <a href="/deploy" class="nav-link">Deploy</a>
           <a href="/mint" class="nav-link">Mint</a>
           <a href="/market" class="nav-link">Market</a>
-          <a href="/collection" class="nav-link">Collection</a>
         </nav>
         <div class="row gap center">
           <span id="networkBadge" class="badge" title="Network"></span>
@@ -68,9 +67,19 @@
             </label>
 
             <label class="row mt center" style="gap:10px">
-              <input id="depMintNow" type="checkbox" checked />
-              <span>Mint one now (wallet signs and pays price)</span>
+              <input id="depUseSchedule" type="checkbox" />
+              <span>Mint Date</span>
             </label>
+            <div id="depScheduleWrap" class="row gap hidden" aria-live="polite">
+              <label class="stack" style="min-width:220px">
+                <span class="label">Start</span>
+                <input class="input" id="depStart" type="datetime-local" />
+              </label>
+              <label class="stack" style="min-width:220px">
+                <span class="label">End</span>
+                <input class="input" id="depEnd" type="datetime-local" />
+              </label>
+            </div>
           </form>
 
           <div>

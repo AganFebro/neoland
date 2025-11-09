@@ -8,24 +8,26 @@ async function loadHyped() {
     wrap.innerHTML = '<div class="muted">No collections yet. Deploy one!</div>';
     return;
   }
-  // Simple hype metric: highest minted_count (fallback to supply progress)
+  // Simple hype metric: highest minted_count; show top 3
   const sorted = [...collections].sort((a, b) => (b.minted_count || 0) - (a.minted_count || 0));
-  const top = sorted[0];
-  const el = document.createElement('div');
-  el.className = 'nft';
-  const minted = `${top.minted_count || 0}/${top.supply || 0}`;
-  el.innerHTML = `
-    <img alt="${top.name}" loading="lazy" />
-    <div class="meta"><strong>${top.name}</strong> <span>(${top.symbol})</span></div>
-    <div class="meta">Minted: ${minted}</div>
-    <div class="row gap mt">
-      <a class="btn" href="/mint">Mint Now</a>
-      <a class="btn btn-ghost" href="/collection">View Collections</a>
-    </div>
-  `;
-  setImgSrc(el.querySelector('img'), top.image);
+  const top3 = sorted.slice(0, 3);
   wrap.innerHTML = '';
-  wrap.appendChild(el);
+  top3.forEach((c) => {
+    const el = document.createElement('div');
+    el.className = 'nft';
+    const minted = `${c.minted_count || 0}/${c.supply || 0}`;
+    el.innerHTML = `
+      <img alt="${c.name}" loading="lazy" />
+      <div class="meta"><strong>${c.name}</strong> <span>(${c.symbol})</span></div>
+      <div class="meta">Minted: ${minted}</div>
+      <div class="row gap mt">
+        <a class="btn" href="/mint">Mint Now</a>
+        <a class="btn btn-ghost" href="/market">View Market</a>
+      </div>
+    `;
+    setImgSrc(el.querySelector('img'), c.image);
+    wrap.appendChild(el);
+  });
 }
 
 window.addEventListener('DOMContentLoaded', () => {

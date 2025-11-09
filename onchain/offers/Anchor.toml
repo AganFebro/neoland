@@ -1,0 +1,6 @@
+[programs.localnet]
+offers = "OFFERS11111111111111111111111111111111111"
+
+[workspace]
+members = ["programs/offers"]
+

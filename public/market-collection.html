@@ -26,7 +26,6 @@
           <a href="/deploy" class="nav-link">Deploy</a>
           <a href="/mint" class="nav-link">Mint</a>
           <a href="/market" class="nav-link active">Market</a>
-          <a href="/collection" class="nav-link">Collection</a>
         </nav>
         <div class="row gap center">
           <span id="networkBadge" class="badge" title="Network"></span>
@@ -51,6 +50,7 @@
             <div class="row gap mt" role="tablist" aria-label="Collection sections">
               <button id="tabItems" class="btn btn-ghost" role="tab" aria-selected="true">Items</button>
               <button id="tabActivity" class="btn btn-ghost" role="tab" aria-selected="false">Activity</button>
+              <button id="tabOwned" class="btn btn-ghost" role="tab" aria-selected="false">Owned</button>
             </div>
           </div>
           <input id="itemSearch" class="input-search" placeholder="Search by mint" />
@@ -67,11 +67,17 @@
             <div class="skeleton text"></div>
           </div>
         </section>
+        <section id="sectionOwned" class="hidden">
+          <div id="ownedWrap" class="grid">
+            <div class="skeleton block"></div>
+            <div class="skeleton text"></div>
+          </div>
+        </section>
       </section>
     </main>
 
     <footer class="container muted small center mt">Participating in CARV Hackathon, website may be unstable.</footer>
 
-    <script type="module" src="/market-collection.js?v=2"></script>
+    <script type="module" src="/market-collection.js?v=3"></script>
   </body>
   </html>

@@ -1,0 +1,16 @@
+[programs.localnet]
+collection = "COLLECT11111111111111111111111111111111111"
+
+[registry]
+url = "https://anchor.projectserum.com"
+
+[provider]
+cluster = "localnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "anchor test"
+
+[workspace]
+members = ["programs/collection"]
+

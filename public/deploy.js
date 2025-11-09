@@ -7,25 +7,40 @@ window.addEventListener('DOMContentLoaded', () => {
   const fileInput = document.getElementById('depImage');
   const preview = document.getElementById('depPreview');
   const priceInput = document.getElementById('depPrice');
-  const mintNowInput = document.getElementById('depMintNow');
   const placeholder = document.getElementById('depPlaceholder');
   const drop = document.getElementById('depDrop');
   const fileName = document.getElementById('depFileName');
   const priceUsdBox = document.getElementById('depPriceUsd');
-  // Live USD estimate for price
+  const useSchedule = document.getElementById('depUseSchedule');
+  const scheduleWrap = document.getElementById('depScheduleWrap');
+  const startInput = document.getElementById('depStart');
+  const endInput = document.getElementById('depEnd');
+  // Live USD + CARV estimate for price
   (async () => {
     try {
-      const r = await fetch('/api/sol-price');
-      const j = r.ok ? await r.json() : {};
-      const usd = typeof j.usd === 'number' ? j.usd : null;
+      const j = await fetch('/api/prices').then(r => r.ok ? r.json() : {});
+      const usd = typeof j.solUsd === 'number' ? j.solUsd : null;
+      const carvPerSol = typeof j.carvPerSol === 'number' ? j.carvPerSol : null;
       const update = () => {
         const v = Number(priceInput.value || 0);
-        if (usd && isFinite(v)) priceUsdBox.textContent = `≈ $${(v * usd).toFixed(2)}`; else priceUsdBox.textContent = '';
+        if (isFinite(v) && (usd || carvPerSol)) {
+          const usdTxt = usd ? `≈ $${(v * usd).toFixed(2)}` : '';
+          const carvTxt = carvPerSol ? ` • ≈ ${(v * carvPerSol).toFixed(2)} CARV` : '';
+          priceUsdBox.textContent = `${usdTxt}${carvTxt}`.replace(/^\s+|\s+$/g, '');
+        } else {
+          priceUsdBox.textContent = '';
+        }
       };
       priceInput.addEventListener('input', update);
       update();
     } catch {}
   })();
+
+  // Toggle schedule inputs
+  try {
+    const updateSched = () => { if (scheduleWrap) scheduleWrap.classList.toggle('hidden', !useSchedule?.checked); };
+    if (useSchedule) { useSchedule.addEventListener('change', updateSched); updateSched(); }
+  } catch {}
 
   // Live 1:1 preview (supports PNG transparency)
   function setName(name) { if (fileName) fileName.textContent = name || 'PNG/JPG • drag & drop supported'; }
@@ -83,6 +98,18 @@ window.addEventListener('DOMContentLoaded', () => {
     const supply = Number(document.getElementById('depSupply').value || 0);
     const price = Number(document.getElementById('depPrice').value || 0);
     const file = fileInput.files[0];
+    // schedule validation
+    let mintStartTs = null, mintEndTs = null;
+    if (useSchedule?.checked) {
+      const s = startInput?.value || '';
+      const e2 = endInput?.value || '';
+      if (!s || !e2) { showToast('Provide both start and end date/time', { title: 'Validation', variant: 'error' }); return; }
+      const ss = Math.floor(new Date(s).getTime() / 1000);
+      const ee = Math.floor(new Date(e2).getTime() / 1000);
+      if (!ss || !ee || !isFinite(ss) || !isFinite(ee)) { showToast('Invalid start or end time', { title: 'Validation', variant: 'error' }); return; }
+      if (ee <= ss) { showToast('End time must be after start', { title: 'Validation', variant: 'error' }); return; }
+      mintStartTs = ss; mintEndTs = ee;
+    }
     // Inline validation
     if (!name) { showToast('Name is required', { title: 'Validation', variant: 'error' }); return; }
     if (!symbol || symbol.length < 2 || symbol.length > 10) { showToast('Symbol must be 2-10 uppercase letters', { title: 'Validation', variant: 'error' }); return; }
@@ -98,6 +125,8 @@ window.addEventListener('DOMContentLoaded', () => {
     Array.from(form.querySelectorAll('input, button')).forEach(el => { el.disabled = true; });
     reader.onload = async () => {
       try {
+
+        // Proceed to IPFS only after preflight check
         const base64 = reader.result.split(',')[1];
         const img = await fetchJSON('/api/pin/image', {
           method: 'POST',
@@ -114,67 +143,34 @@ window.addEventListener('DOMContentLoaded', () => {
             properties: { files: [{ uri: img.gateway, type: file.type || 'image/png' }] },
           }),
         });
-        const mintNow = !!mintNowInput?.checked;
+        // Always: Create on-chain collection PDA proof, then register in DB (no auto mint)
         let collId = null;
-        if (mintNow) {
-          // Wallet-signed mint (1/1) — atomically create collection and build tx
-          const { Keypair, Transaction, Connection } = await import('https://esm.sh/@solana/web3.js@1.98.0');
-          const mint = Keypair.generate();
-          const r = await fetchJSON('/api/deploy-and-mint', {
-            method: 'POST',
-            body: JSON.stringify({ name, symbol, supply, price, imageCid: img.imageCid, metadataUri: meta.metadataUri, metadataGateway: meta.gateway, owner: publicKey, payer: publicKey, mintPubkey: mint.publicKey.toBase58() }),
-          });
-          collId = r.id;
-          const buf = Uint8Array.from(atob(r.tx), c => c.charCodeAt(0));
-          const tx = Transaction.from(buf);
-          tx.partialSign(mint);
-          const signed = await provider.signTransaction(tx);
-          const { rpc } = await getConfig();
-          const connection = new Connection(rpc, 'confirmed');
-          const sig = await sendAndTrack(connection, signed.serialize(), { commitment: 'confirmed', timeoutMs: 120000 });
-          try {
-            await waitForConfirmation(connection, sig, { timeoutMs: 90000, desired: 'confirmed' });
-          } catch (e) {
-            showToast('Network slow to confirm. Check explorer.', { title: 'Pending', variant: 'info', actions: [ { label: 'View on Explorer', onClick: async () => window.open(await txExplorerUrl(sig), '_blank') } ] });
-          }
-          await fetchJSON('/api/record-mint', { method: 'POST', body: JSON.stringify({ id: r.id, mint: mint.publicKey.toBase58(), minter: publicKey, ts: Math.floor(Date.now()/1000) }) });
-          const short = `${sig.slice(0, 6)}...${sig.slice(-6)}`;
-          const toast = showToast(`ID: <code>${collId}</code><br/>Tx: ${short}<br/><br/>Redirecting to Mint in <span id="depCountdown">5</span>s…`, {
-            title: 'Deployed + Minted 1/1',
-            variant: 'success',
-            actions: [
-              { label: 'Copy Tx', onClick: () => navigator.clipboard?.writeText(sig) },
-              { label: 'View on Explorer', onClick: async () => window.open(await txExplorerUrl(sig), '_blank') },
-              { label: 'Go Now', onClick: () => (window.location.href = '/mint') },
-            ],
-          });
-          // Auto-redirect countdown
-          let n = 5;
-          const el = toast?.querySelector?.('#depCountdown');
-          const timer = setInterval(() => { n -= 1; if (el) el.textContent = String(n); if (n <= 0) { clearInterval(timer); window.location.href = '/mint'; } }, 1000);
-        } else {
-          // Create on-chain collection PDA proof, then register in DB (no mint)
-          const init = await fetchJSON('/api/tx/init-collection', {
-            method: 'POST',
-            body: JSON.stringify({ payer: publicKey, owner: publicKey, name, symbol, metadataUri: meta.metadataUri, price, supply }),
-          });
-          const { Transaction, Connection } = await import('https://esm.sh/@solana/web3.js@1.98.0');
+        const init = await fetchJSON('/api/tx/init-collection', {
+          method: 'POST',
+          body: JSON.stringify({ payer: publicKey, owner: publicKey, name, symbol, metadataUri: meta.metadataUri, price, supply }),
+        });
+        const { Transaction, Connection } = await import('https://esm.sh/@solana/web3.js@1.98.0');
+        let initSig = null;
+        if (init?.tx) {
           const buf = Uint8Array.from(atob(init.tx), c => c.charCodeAt(0));
           const tx = Transaction.from(buf);
           const signed = await provider.signTransaction(tx);
           const { rpc } = await getConfig();
           const connection = new Connection(rpc, 'confirmed');
-          const sig = await sendAndTrack(connection, signed.serialize(), { commitment: 'confirmed', timeoutMs: 120000 });
-          try { await waitForConfirmation(connection, sig, { timeoutMs: 90000, desired: 'confirmed' }); } catch {}
-
-          const r = await fetchJSON('/api/deploy/config', {
-            method: 'POST',
-            body: JSON.stringify({ name, symbol, supply, price, imageCid: img.imageCid, metadataUri: meta.metadataUri, metadataGateway: meta.gateway, owner: publicKey, onchainPda: init.collectionPda }),
-          });
-          collId = r.id;
-          const short = `${sig.slice(0, 6)}...${sig.slice(-6)}`;
-          showToast(`ID: <code>${collId}</code><br/>On-chain: ${short}`, { title: 'Collection Created', variant: 'success', actions: [ { label: 'View Tx', onClick: async () => window.open(await txExplorerUrl(sig), '_blank') }, { label: 'Go to Mint', onClick: () => (window.location.href = '/mint') } ] });
+          initSig = await sendAndTrack(connection, signed.serialize(), { commitment: 'confirmed', timeoutMs: 120000 });
+          try { await waitForConfirmation(connection, initSig, { timeoutMs: 90000, desired: 'confirmed' }); } catch {}
         }
+
+        const r = await fetchJSON('/api/deploy/config', {
+          method: 'POST',
+          body: JSON.stringify({ name, symbol, supply, price, imageCid: img.imageCid, metadataUri: meta.metadataUri, metadataGateway: meta.gateway, owner: publicKey, onchainPda: init.collectionPda, mintStartTs, mintEndTs }),
+        });
+        collId = r.id;
+        const short = initSig ? `${initSig.slice(0, 6)}...${initSig.slice(-6)}` : 'already initialized';
+        const actions = [];
+        if (initSig) actions.push({ label: 'View Tx', onClick: async () => window.open(await txExplorerUrl(initSig), '_blank') });
+        actions.push({ label: 'Go to Mint', onClick: () => (window.location.href = '/mint') });
+        showToast(`ID: <code>${collId}</code><br/>On-chain: ${short}`, { title: 'Collection Created', variant: 'success', actions });
 
         // Fill success panel
         const sec = document.getElementById('deploySuccess');

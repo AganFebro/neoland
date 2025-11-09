@@ -18,6 +18,7 @@ import {
   createInitializeMintInstruction,
   createAssociatedTokenAccountInstruction,
   createMintToInstruction,
+  ASSOCIATED_TOKEN_PROGRAM_ID,
 } from '@solana/spl-token';
 // We will deep-import serializers to build raw web3 instructions.
 import { getCreateMetadataAccountV3InstructionDataSerializer as getMetaSer } from '@metaplex-foundation/mpl-token-metadata/dist/src/generated/instructions/createMetadataAccountV3.js';
@@ -30,6 +31,9 @@ const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 const RPC = process.env.CARV_RPC || process.env.CARV_SVM_RPC || 'https://rpc.testnet.carv.io/rpc';
 const NETWORK = process.env.CARV_NETWORK || 'carv-testnet';
 const COLLECTION_PROGRAM_ID = new PublicKey(process.env.COLLECTION_PROGRAM_ID || 'COLLECT11111111111111111111111111111111111');
+const OFFERS_PROGRAM_ID = new PublicKey(process.env.OFFERS_PROGRAM_ID || 'OFFERS11111111111111111111111111111111111');
+// CARV token mint (defaults to provided address)
+const CARV_MINT = new PublicKey(process.env.CARV_MINT || 'D7WVEw9Pkf4dfCCE3fwGikRCCTvm9ipqTYPHRENLiw3s');
 // Legacy JSON path retained for static file fallback only (DB layer handles persistence)
 const DATA_PATH = path.resolve('./data.json');
 const PORT = Number(process.env.PORT || 8080);
@@ -69,7 +73,69 @@ async function getSolUsd() {
   return null;
 }
 
+// Cached CARV price (USD)
+let __carvQuote = null; // { usd, ts }
+async function getCarvUsd() {
+  const now = Date.now();
+  if (__carvQuote && now - __carvQuote.ts < 60_000) return __carvQuote.usd;
+  const key = process.env.CMC_API_KEY || process.env.COINMARKETCAP_API_KEY;
+  if (!key) return null;
+  try {
+    const r = await fetch('https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest?symbol=CARV&convert=USD', {
+      headers: { 'X-CMC_PRO_API_KEY': key, 'Accept': 'application/json' },
+    });
+    if (!r.ok) throw new Error('cmc http ' + r.status);
+    const j = await r.json();
+    const usd = j?.data?.CARV?.quote?.USD?.price;
+    if (typeof usd === 'number' && isFinite(usd)) {
+      __carvQuote = { usd, ts: now };
+      return usd;
+    }
+  } catch (e) {
+    console.error('CMC CARV price fetch failed:', e.message || e);
+  }
+  return null;
+}
+
 // All persistence now handled by db.js (SQLite or file-fallback)
+
+// Simple in-memory admin auth nonces
+const __adminNonces = new Map(); // addr -> { nonce, ts }
+function _gcNonces() {
+  const now = Date.now();
+  for (const [k, v] of __adminNonces.entries()) {
+    if (!v || (now - (v.ts || 0)) > 5 * 60_000) __adminNonces.delete(k);
+  }
+}
+function issueNonce(addr) {
+  _gcNonces();
+  const nonce = crypto.randomBytes(16).toString('hex');
+  __adminNonces.set(String(addr), { nonce, ts: Date.now() });
+  return nonce;
+}
+function takeNonce(addr, nonce) {
+  _gcNonces();
+  const cur = __adminNonces.get(String(addr));
+  if (!cur || cur.nonce !== String(nonce)) return false;
+  __adminNonces.delete(String(addr));
+  return true;
+}
+
+function spkiFromSolPubkey(base58) {
+  const raw = bs58.decode(base58);
+  if (raw.length !== 32) throw new Error('bad pubkey');
+  const prefix = Buffer.from('302a300506032b6570032100', 'hex');
+  return Buffer.concat([prefix, Buffer.from(raw)]);
+}
+function verifyEd25519({ addr, message, signature }) {
+  try {
+    const key = spkiFromSolPubkey(addr);
+    const sig = Buffer.isBuffer(signature) ? signature : bs58.decode(String(signature));
+    return crypto.verify(null, Buffer.from(message), { key, format: 'der', type: 'spki' }, sig);
+  } catch {
+    return false;
+  }
+}
 
 function findMetadataPda(mint) {
   return PublicKey.findProgramAddressSync(
@@ -134,7 +200,7 @@ function createUpdateMetadataAccountV2Instruction({ metadata, updateAuthority, d
 // After creating the Master Edition, we transfer metadata update authority
 // to `finalUpdateAuthority` (usually the collection owner) so that minters
 // are NOT the update authority.
-async function buildMintNftTx({ payer, mintPubkey, name, symbol, metadataUri, paymentLamports = 0, paymentTo = null, finalUpdateAuthority = null }) {
+async function buildMintNftTx({ payer, mintPubkey, name, symbol, metadataUri, paymentLamports = 0, paymentTo = null, finalUpdateAuthority = null, paymentTokenMint = null, paymentAmount = 0 }) {
   const payerPk = new PublicKey(payer);
   const mintPk = new PublicKey(mintPubkey);
   const metadataPda = findMetadataPda(mintPk);
@@ -144,15 +210,17 @@ async function buildMintNftTx({ payer, mintPubkey, name, symbol, metadataUri, pa
   const lamportsForMint = await conn.getMinimumBalanceForRentExemption(MINT_SIZE);
 
   const ixes = [];
-  // If a payment is required, add it as the first instruction so it executes atomically with mint
+  // If a SOL payment is required, add it as the first instruction so it executes atomically with mint
   const lamportsToPay = Number(paymentLamports || 0);
-  if (paymentTo && lamportsToPay > 0) {
+  if (paymentTo && lamportsToPay > 0 && !paymentTokenMint) {
     const toPk = new PublicKey(paymentTo);
     // Always include the transfer, even if payer == recipient.
     // When from == to, SystemProgram.transfer still requires the payer
     // to have at least `lamportsToPay` available, enforcing the price.
     ixes.push(SystemProgram.transfer({ fromPubkey: payerPk, toPubkey: toPk, lamports: lamportsToPay }));
   }
+  // Optional SPL-token payment path (e.g., CARV): supply paymentTokenMint and paymentAmount in base units
+  const paymentTokenMintStr = null; // placeholder to allow future extension via overload below
   ixes.push(SystemProgram.createAccount({
     fromPubkey: payerPk,
     newAccountPubkey: mintPk,
@@ -219,12 +287,38 @@ async function buildMintNftTx({ payer, mintPubkey, name, symbol, metadataUri, pa
     } catch {}
   }
 
+  // Optionally prepend SPL-token payment (CARV)
+  let needsDeployerSig = false;
+  if (paymentTo && paymentTokenMint && Number(paymentAmount || 0) > 0) {
+    const { getAssociatedTokenAddress, createAssociatedTokenAccountInstruction, createTransferInstruction } = await import('@solana/spl-token');
+    const tokenMintPk = new PublicKey(paymentTokenMint);
+    const recipientPk = new PublicKey(paymentTo);
+    const recipientAta = await getAssociatedTokenAddress(tokenMintPk, recipientPk);
+    // Check if recipient ATA exists; if not, create with deployer as payer
+    const ai = await conn.getAccountInfo(recipientAta);
+    if (!ai) {
+      ixes.unshift(createAssociatedTokenAccountInstruction(deployer.publicKey, recipientAta, recipientPk, tokenMintPk));
+      needsDeployerSig = true;
+    }
+    // Add token transfer from payer (minter) to recipient
+    ixes.unshift(createTransferInstruction(
+      await getAssociatedTokenAddress(tokenMintPk, payerPk),
+      recipientAta,
+      payerPk,
+      BigInt(Math.round(Number(paymentAmount || 0)))
+    ));
+  }
+
   const tx = new Transaction();
   tx.feePayer = payerPk;
   ixes.forEach((ix) => tx.add(ix));
   const { blockhash } = await conn.getLatestBlockhash('finalized');
   tx.recentBlockhash = blockhash;
-  // Important: server does not sign; client must sign with wallet AND the mint keypair
+  // If we created any ATAs for token payments, server (deployer) must co-sign
+  if (needsDeployerSig) {
+    tx.partialSign(deployer);
+  }
+  // Important: client must sign with wallet AND the mint keypair
   return tx;
 }
 
@@ -258,10 +352,14 @@ function borshU64(n) {
   return buf;
 }
 
-function borshU32(n) {
+  function borshU32(n) {
   const buf = Buffer.alloc(4);
   buf.writeUInt32LE(Math.max(0, Math.min(0xffffffff, Number(n || 0)|0)));
   return buf;
+}
+
+function borshPubkey(pk) {
+  return new PublicKey(pk).toBuffer();
 }
 
 function sha256Bytes(s) {
@@ -294,13 +392,16 @@ async function serveStatic(req, res, pathname) {
   } else if (!path.extname(pathname)) {
     // Map clean routes to html files, e.g. /deploy -> /public/deploy.html
     const clean = pathname.replace(/^\/+/, '');
-    // Special-case dynamic market collection route: /market/<slug>
+    // Special-case dynamic market/ mint collection routes
     if (/^market\/[^/]+$/.test(clean)) {
       filePath = path.join(base, 'market-collection.html');
+    } else if (/^mint\/[^/]+$/.test(clean)) {
+      filePath = path.join(base, 'mint-collection.html');
     } else {
       filePath = path.join(base, `${clean}.html`);
     }
   }
+  function borshU8(n) { const b = Buffer.alloc(1); b.writeUInt8(Math.max(0, Math.min(255, Number(n||0)|0))); return b; }
   while (true) {
     try {
       const st = await stat(filePath);
@@ -365,11 +466,98 @@ export async function handleRequest(req, res) {
 
     // API routes
     if (pathname === '/api/config' && req.method === 'GET') {
-      return sendJson(res, 200, { rpc: RPC, network: NETWORK });
+      return sendJson(res, 200, { rpc: RPC, network: NETWORK, offersProgramId: OFFERS_PROGRAM_ID.toBase58(), collectionProgramId: COLLECTION_PROGRAM_ID.toBase58() });
+    }
+    // Admin auth: issue nonce bound to wallet address
+    if (pathname === '/api/admin/nonce' && req.method === 'GET') {
+      const { addr } = query || {};
+      if (!addr) return sendJson(res, 400, { error: 'addr required' });
+      const nonce = issueNonce(addr);
+      const msg = `neoland admin\naddr:${addr}\nnonce:${nonce}\naction:update-collection`;
+      return sendJson(res, 200, { nonce, message: msg });
+    }
+    // Admin update endpoint (signed-message auth)
+    if (pathname === '/api/admin/update-collection' && req.method === 'POST') {
+      const body = await getParsedBody(req);
+      const { id, addr, nonce, signature, patch } = body || {};
+      if (!id || !addr || !nonce || !signature || !patch || typeof patch !== 'object') {
+        return sendJson(res, 400, { error: 'id, addr, nonce, signature, patch required' });
+      }
+      // Verify nonce and signature
+      if (!takeNonce(addr, nonce)) return sendJson(res, 400, { error: 'invalid or expired nonce' });
+      // Normalize patch to a stable JSON for signing
+      const allowedKeys = ['priceSol', 'price_lamports', 'mintStartTs', 'mintEndTs', 'supply', 'tradingPaused'];
+      const canon = {};
+      for (const k of allowedKeys) { if (k in patch) canon[k] = patch[k]; }
+      const msg = `neoland admin\naddr:${addr}\nnonce:${nonce}\naction:update-collection\nid:${id}\npatch:${JSON.stringify(canon)}`;
+      const ok = verifyEd25519({ addr, message: msg, signature });
+      if (!ok) return sendJson(res, 401, { error: 'bad signature' });
+
+      const dbh = await getDb();
+      const coll = await dbh.getCollectionById(id);
+      if (!coll) return sendJson(res, 404, { error: 'collection not found' });
+      if (String(coll.owner) !== String(addr)) return sendJson(res, 403, { error: 'not collection owner' });
+
+      // Build validated updates per rules
+      const updates = {};
+      const now = Math.floor(Date.now() / 1000);
+      const start = coll.mintStartTs != null ? Number(coll.mintStartTs) : null;
+      const end = coll.mintEndTs != null ? Number(coll.mintEndTs) : null;
+      // Price
+      if (canon.price_lamports != null || canon.priceSol != null) {
+        const lamports = canon.price_lamports != null ? Number(canon.price_lamports || 0) : Math.round(Number(canon.priceSol || 0) * LAMPORTS_PER_SOL);
+        updates.price_lamports = Math.max(0, lamports|0);
+      }
+      // Supply: clamp to [10, 100000] and cannot go below minted_count
+      if (canon.supply != null) {
+        const req = Number(canon.supply || 0);
+        const floor = Math.max(10, Number(coll.minted_count || 0));
+        const ceil = 100000;
+        const clamped = Math.max(floor, Math.min(ceil, req));
+        updates.supply = clamped;
+      }
+      // Mint window rules
+      if ('mintStartTs' in canon || 'mintEndTs' in canon) {
+        const reqStart = canon.mintStartTs != null ? Number(canon.mintStartTs) : null;
+        const reqEnd = canon.mintEndTs != null ? Number(canon.mintEndTs) : null;
+        // If not started yet, allow start+end edits; once started, only allow end edits
+        const hasStarted = start != null ? (now >= start) : false;
+        const nextStart = hasStarted ? start : (reqStart != null ? reqStart : start);
+        const nextEnd = reqEnd != null ? reqEnd : end;
+        if (nextStart != null && nextEnd != null && nextEnd <= nextStart) {
+          return sendJson(res, 400, { error: 'end must be after start' });
+        }
+        if (!hasStarted && 'mintStartTs' in canon) updates.mint_start_ts = nextStart != null ? Number(nextStart) : null;
+        if ('mintEndTs' in canon) updates.mint_end_ts = nextEnd != null ? Number(nextEnd) : null;
+      }
+      // Trading pause flag
+      if ('tradingPaused' in canon) updates.trading_paused = !!canon.tradingPaused;
+
+      // Apply
+      await dbh.updateCollectionFields(id, updates);
+
+      // Audit logs
+      try {
+        if ('tradingPaused' in canon) {
+          await dbh.addActivity({ collectionId: id, type: canon.tradingPaused ? 'admin_pause' : 'admin_resume', ts: now, actor1: addr });
+        }
+        if ('supply' in canon) await dbh.addActivity({ collectionId: id, type: 'admin_supply', ts: now, actor1: addr });
+        if ('price_lamports' in canon || 'priceSol' in canon) await dbh.addActivity({ collectionId: id, type: 'admin_price', ts: now, actor1: addr });
+        if ('mintStartTs' in canon || 'mintEndTs' in canon) await dbh.addActivity({ collectionId: id, type: 'admin_window', ts: now, actor1: addr });
+      } catch {}
+
+      const updated = await dbh.getCollectionById(id);
+      return sendJson(res, 200, { ok: true, collection: updated });
     }
     if (pathname === '/api/sol-price' && req.method === 'GET') {
       const usd = await getSolUsd();
       return sendJson(res, 200, { usd, source: 'coinmarketcap', cached: __solQuote && (Date.now() - __solQuote.ts) < 60_000 });
+    }
+    if (pathname === '/api/prices' && req.method === 'GET') {
+      const [solUsd, carvUsd] = await Promise.all([getSolUsd(), getCarvUsd()]);
+      let carvPerSol = null;
+      if (solUsd && carvUsd) carvPerSol = solUsd / carvUsd;
+      return sendJson(res, 200, { solUsd, carvUsd, carvPerSol, source: 'coinmarketcap' });
     }
     if (pathname === '/api/debug/db' && req.method === 'GET') {
       // Returns which DB backend is active
@@ -387,10 +575,15 @@ export async function handleRequest(req, res) {
         name: c.name,
         symbol: c.symbol,
         image: c.image_gateway || null,
+        owner: c.owner || null,
         priceLamports: c.priceLamports,
         supply: c.supply,
         minted_count: c.minted_count,
         metadata_uri: c.metadata_gateway || c.metadata_uri || null,
+        onchain_pda: c.onchain_pda || null,
+        mintStartTs: c.mintStartTs != null ? Number(c.mintStartTs) : null,
+        mintEndTs: c.mintEndTs != null ? Number(c.mintEndTs) : null,
+        tradingPaused: !!c.tradingPaused,
       }));
       return sendJson(res, 200, { collections: list });
     }
@@ -460,16 +653,43 @@ export async function handleRequest(req, res) {
 
     if (pathname === '/api/tx/mint-nft' && req.method === 'POST') {
       const body = await getParsedBody(req);
-      const { id, payer, mintPubkey } = body || {};
+      const { id, payer, mintPubkey, currencyMint } = body || {};
       if (!id || !payer || !mintPubkey) return sendJson(res, 400, { error: 'id, payer, mintPubkey required' });
       const dbh = await getDb();
       const cfg = await dbh.getCollectionById(id);
       if (!cfg) return sendJson(res, 404, { error: 'collection not found' });
 
+      // Enforce mint window if configured
+      const now = Math.floor(Date.now() / 1000);
+      const start = cfg.mintStartTs != null ? Number(cfg.mintStartTs) : null;
+      const end = cfg.mintEndTs != null ? Number(cfg.mintEndTs) : null;
+      if (start != null && now < start) return sendJson(res, 400, { error: 'mint not started', start, end });
+      if (end != null && now > end) return sendJson(res, 400, { error: 'mint ended', start, end });
+
       const maxSupply = Number(cfg.supply ?? 0);
       const mintedCount = Number(cfg.minted_count ?? 0);
       if (maxSupply && mintedCount + 1 > maxSupply) {
         return sendJson(res, 400, { error: 'sold out or insufficient remaining supply' });
+      }
+
+      // Determine payment method
+      let paymentTokenMint = null;
+      let paymentAmount = 0;
+      if (currencyMint && String(currencyMint) !== '' && String(currencyMint) !== '11111111111111111111111111111111') {
+        try {
+          const pk = new PublicKey(currencyMint);
+          if (pk.equals(CARV_MINT)) {
+            // Convert SOL price to CARV units using CMC quotes
+            const [solUsd, carvUsd] = await Promise.all([getSolUsd(), getCarvUsd()]);
+            if (!solUsd || !carvUsd) return sendJson(res, 400, { error: 'price quotes unavailable' });
+            const solPrice = Number(cfg.priceLamports || 0) / LAMPORTS_PER_SOL;
+            const usd = solPrice * solUsd;
+            const carv = usd / carvUsd;
+            // CARV has 9 decimals
+            paymentTokenMint = CARV_MINT.toBase58();
+            paymentAmount = Math.round(carv * 1_000_000_000);
+          }
+        } catch {}
       }
 
       const tx = await buildMintNftTx({
@@ -478,16 +698,189 @@ export async function handleRequest(req, res) {
         name: cfg.name || 'CARV NFT',
         symbol: cfg.symbol || 'CARV',
         metadataUri: cfg.metadata_gateway || cfg.metadata_uri,
-        // If price is set, collect SOL to deployer in the same transaction
-        paymentLamports: Number(cfg.priceLamports || 0) || 0,
+        // If price is set, collect payment (SOL or CARV) to deployer in the same transaction
+        paymentLamports: paymentTokenMint ? 0 : (Number(cfg.priceLamports || 0) || 0),
         paymentTo: cfg.owner || null,
         finalUpdateAuthority: cfg.owner || null,
+        paymentTokenMint,
+        paymentAmount,
       });
       const serialized = tx.serialize({ requireAllSignatures: false });
       return sendJson(res, 200, { tx: Buffer.from(serialized).toString('base64') });
     }
 
+    // Build a batch mint transaction for multiple NFTs in a single approval.
+    // Body: { id, payer, mintPubkeys: [..], currencyMint? }
+    if (pathname === '/api/tx/mint-nft-batch' && req.method === 'POST') {
+      const body = await getParsedBody(req);
+      const { id, payer, mintPubkeys = [], currencyMint } = body || {};
+      if (!id || !payer || !Array.isArray(mintPubkeys) || mintPubkeys.length === 0) {
+        return sendJson(res, 400, { error: 'id, payer, mintPubkeys required' });
+      }
+      const dbh = await getDb();
+      const cfg = await dbh.getCollectionById(id);
+      if (!cfg) return sendJson(res, 404, { error: 'collection not found' });
+      // Enforce mint window
+      const now = Math.floor(Date.now() / 1000);
+      const start = cfg.mintStartTs != null ? Number(cfg.mintStartTs) : null;
+      const end = cfg.mintEndTs != null ? Number(cfg.mintEndTs) : null;
+      if (start != null && now < start) return sendJson(res, 400, { error: 'mint not started', start, end });
+      if (end != null && now > end) return sendJson(res, 400, { error: 'mint ended', start, end });
+      const qty = mintPubkeys.length;
+      const maxSupply = Number(cfg.supply ?? 0);
+      const mintedCount = Number(cfg.minted_count ?? 0);
+      if (maxSupply && mintedCount + qty > maxSupply) {
+        return sendJson(res, 400, { error: 'insufficient remaining supply for requested quantity' });
+      }
+
+      const payerPk = new PublicKey(payer);
+      const ixes = [];
+      try { const { ComputeBudgetProgram } = await import('@solana/web3.js'); ixes.push(ComputeBudgetProgram.setComputeUnitLimit({ units: 1_200_000 })); } catch {}
+      let needsDeployerSig = false;
+
+      // Aggregate payment (one transfer) to collection owner
+      const priceLamportsEach = Number(cfg.priceLamports || 0) || 0;
+      const paymentTo = cfg.owner || null;
+
+      if (paymentTo && priceLamportsEach > 0) {
+        if (currencyMint && String(currencyMint) !== '' && String(currencyMint) !== '11111111111111111111111111111111') {
+          // SPL token (e.g., CARV) payment aggregation
+          try {
+            const { getAssociatedTokenAddress, createAssociatedTokenAccountInstruction, createTransferInstruction } = await import('@solana/spl-token');
+            const tokenMintPk = new PublicKey(currencyMint);
+            const recipientPk = new PublicKey(paymentTo);
+            const recipientAta = await getAssociatedTokenAddress(tokenMintPk, recipientPk);
+            const ai = await conn.getAccountInfo(recipientAta);
+            if (!ai) { ixes.push(createAssociatedTokenAccountInstruction(deployer.publicKey, recipientAta, recipientPk, tokenMintPk)); needsDeployerSig = true; }
+            // Convert SOL price -> USD -> CARV units
+            const [solUsd, carvUsd] = await Promise.all([getSolUsd(), getCarvUsd()]);
+            if (!solUsd || !carvUsd) return sendJson(res, 400, { error: 'price quotes unavailable' });
+            const sol = priceLamportsEach / LAMPORTS_PER_SOL;
+            const totalCarv = Math.round((sol * solUsd / carvUsd) * qty * 1_000_000_000);
+            ixes.push(createTransferInstruction(
+              await getAssociatedTokenAddress(tokenMintPk, payerPk),
+              recipientAta,
+              payerPk,
+              BigInt(totalCarv)
+            ));
+          } catch (e) {
+            return sendJson(res, 500, { error: 'failed to build SPL payment', details: String(e.message || e) });
+          }
+        } else {
+          // Aggregate SOL transfer once
+          const lamports = Math.round(priceLamportsEach * qty);
+          ixes.push(SystemProgram.transfer({ fromPubkey: payerPk, toPubkey: new PublicKey(paymentTo), lamports }));
+        }
+      }
+
+      // Add mint instructions for each NFT (no per-item payment here)
+      for (const m of mintPubkeys) {
+        try {
+          const txOne = await buildMintNftTx({
+            payer,
+            mintPubkey: m,
+            name: cfg.name || 'CARV NFT',
+            symbol: cfg.symbol || 'CARV',
+            metadataUri: cfg.metadata_gateway || cfg.metadata_uri,
+            paymentLamports: 0,
+            paymentTo: null,
+            finalUpdateAuthority: cfg.owner || null,
+          });
+          txOne.instructions.forEach((ix) => ixes.push(ix));
+        } catch (e) {
+          return sendJson(res, 500, { error: 'failed to build mint instructions', details: String(e.message || e) });
+        }
+      }
+
+      const tx = new Transaction();
+      tx.feePayer = payerPk;
+      ixes.forEach((ix) => tx.add(ix));
+      const { blockhash } = await conn.getLatestBlockhash('finalized');
+      tx.recentBlockhash = blockhash;
+      if (needsDeployerSig) tx.partialSign(deployer);
+      const serialized = tx.serialize({ requireAllSignatures: false });
+      return sendJson(res, 200, { tx: Buffer.from(serialized).toString('base64') });
+    }
+
+    // Estimate the maximum number of mints that can fit in one transaction.
+    // Body: { id, payer, currencyMint?, want? }
+    if (pathname === '/api/tx/mint-nft-batch-estimate' && req.method === 'POST') {
+      const body = await getParsedBody(req);
+      const { id, payer, currencyMint, want = 10 } = body || {};
+      if (!id || !payer) return sendJson(res, 400, { error: 'id, payer required' });
+      const dbh = await getDb();
+      const cfg = await dbh.getCollectionById(id);
+      if (!cfg) return sendJson(res, 404, { error: 'collection not found' });
+      const remaining = Math.max(0, Number(cfg.supply || 0) ? Number(cfg.supply || 0) - Number(cfg.minted_count || 0) : Number.MAX_SAFE_INTEGER);
+      if (remaining === 0) return sendJson(res, 200, { max: 0, remaining: 0 });
+      const payerPk = new PublicKey(payer);
+      const upper = Math.max(1, Math.min(Number(want || 10), remaining, 20));
+      let best = 0;
+      for (let n = 1; n <= upper; n++) {
+        try {
+          const ixes = [];
+          try { const { ComputeBudgetProgram } = await import('@solana/web3.js'); ixes.push(ComputeBudgetProgram.setComputeUnitLimit({ units: 1_200_000 })); } catch {}
+          // Aggregate payment for n items
+          const priceLamportsEach = Number(cfg.priceLamports || 0) || 0;
+          const paymentTo = cfg.owner || null;
+          if (paymentTo && priceLamportsEach > 0) {
+            if (currencyMint && String(currencyMint) !== '' && String(currencyMint) !== '11111111111111111111111111111111') {
+              const { getAssociatedTokenAddress, createAssociatedTokenAccountInstruction, createTransferInstruction } = await import('@solana/spl-token');
+              const tokenMintPk = new PublicKey(currencyMint);
+              const recipientPk = new PublicKey(paymentTo);
+              const recipientAta = await getAssociatedTokenAddress(tokenMintPk, recipientPk);
+              const ai = await conn.getAccountInfo(recipientAta);
+              if (!ai) ixes.push(createAssociatedTokenAccountInstruction(deployer.publicKey, recipientAta, recipientPk, tokenMintPk));
+              const [solUsd, carvUsd] = await Promise.all([getSolUsd(), getCarvUsd()]);
+              if (!solUsd || !carvUsd) throw new Error('quotes unavailable');
+              const sol = priceLamportsEach / LAMPORTS_PER_SOL;
+              const totalCarv = Math.round((sol * solUsd / carvUsd) * n * 1_000_000_000);
+              ixes.push(createTransferInstruction(
+                await getAssociatedTokenAddress(tokenMintPk, payerPk),
+                recipientAta,
+                payerPk,
+                BigInt(totalCarv)
+              ));
+            } else {
+              ixes.push(SystemProgram.transfer({ fromPubkey: payerPk, toPubkey: new PublicKey(paymentTo), lamports: Math.round(priceLamportsEach * n) }));
+            }
+          }
+          // Add n mint instruction groups
+          for (let i = 0; i < n; i++) {
+            const mint = Keypair.generate();
+            const txOne = await buildMintNftTx({
+              payer,
+              mintPubkey: mint.publicKey.toBase58(),
+              name: cfg.name || 'CARV NFT',
+              symbol: cfg.symbol || 'CARV',
+              metadataUri: cfg.metadata_gateway || cfg.metadata_uri,
+              paymentLamports: 0,
+              paymentTo: null,
+              finalUpdateAuthority: cfg.owner || null,
+            });
+            txOne.instructions.forEach((ix) => ixes.push(ix));
+          }
+          const tx = new Transaction();
+          tx.feePayer = payerPk;
+          ixes.forEach((ix) => tx.add(ix));
+          const { blockhash } = await conn.getLatestBlockhash('finalized');
+          tx.recentBlockhash = blockhash;
+          // simulate compute (also effectively checks message size; if too large, serialize in simulation will throw)
+          let simOk = true;
+          try {
+            const sim = await conn.simulateTransaction(tx, { sigVerify: false });
+            if (sim?.value?.err) simOk = false;
+          } catch { simOk = false; }
+          if (!simOk) break;
+          best = n;
+        } catch { break; }
+      }
+      return sendJson(res, 200, { max: best, remaining });
+    }
+
     // Atomic create-collection + build mint tx (avoids cross-request persistence issues)
+    // Note: This endpoint persists the collection BEFORE the wallet signs.
+    // Frontend should prefer /api/tx/mint-direct to avoid persisting on user cancel.
     if (pathname === '/api/deploy-and-mint' && req.method === 'POST') {
       const body = await getParsedBody(req);
       const { name, symbol, supply = 0, price = 0, imageCid, metadataUri, metadataGateway, owner, payer, mintPubkey } = body || {};
@@ -499,7 +892,8 @@ export async function handleRequest(req, res) {
         return sendJson(res, 400, { error: 'supply must be an integer between 10 and 100000' });
       }
       const dbh = await getDb();
-      const id = await dbh.createCollection({ name, symbol, supply: parsedSupply, priceLamports: Math.round(Number(price || 0) * LAMPORTS_PER_SOL), imageCid, metadataUri, metadataGateway, owner });
+      const priceLamports = Math.max(0, Math.round(Number(price || 0) * LAMPORTS_PER_SOL));
+      const id = await dbh.createCollection({ name, symbol, supply: parsedSupply, priceLamports, imageCid, metadataUri, metadataGateway, owner });
       const cfg = await dbh.getCollectionById(id);
       const tx = await buildMintNftTx({
         payer,
@@ -513,6 +907,30 @@ export async function handleRequest(req, res) {
       });
       const serialized = tx.serialize({ requireAllSignatures: false });
       return sendJson(res, 200, { id, tx: Buffer.from(serialized).toString('base64') });
+    }
+
+    // Build a mint NFT transaction directly without persisting any DB state.
+    // This is useful for flows where we only want to create DB records after
+    // the user successfully signs and the transaction is confirmed on-chain.
+    // Body: { name, symbol, metadataUri, owner, payer, mintPubkey, price }
+    if (pathname === '/api/tx/mint-direct' && req.method === 'POST') {
+      const body = await getParsedBody(req);
+      const { name, symbol, metadataUri, owner, payer, mintPubkey, price = 0 } = body || {};
+      if (!name || !symbol || !metadataUri || !owner || !payer || !mintPubkey) {
+        return sendJson(res, 400, { error: 'name, symbol, metadataUri, owner, payer, mintPubkey required' });
+      }
+      const tx = await buildMintNftTx({
+        payer,
+        mintPubkey,
+        name,
+        symbol,
+        metadataUri,
+        paymentLamports: Math.max(0, Math.round(Number(price || 0) * LAMPORTS_PER_SOL)) || 0,
+        paymentTo: owner,
+        finalUpdateAuthority: owner,
+      });
+      const serialized = tx.serialize({ requireAllSignatures: false });
+      return sendJson(res, 200, { tx: Buffer.from(serialized).toString('base64') });
     }
 
     // Build an UpdateMetadata tx to change the URI (e.g., to a gateway URL)
@@ -563,6 +981,15 @@ export async function handleRequest(req, res) {
       const seeds = [Buffer.from('collection'), ownerPk.toBuffer(), sha256Bytes(symbol)];
       const [collectionPda] = PublicKey.findProgramAddressSync(seeds, COLLECTION_PROGRAM_ID);
 
+      // If PDA already exists, don't build an init tx. Return the PDA so the
+      // client can proceed without attempting to re-initialize.
+      try {
+        const info = await conn.getAccountInfo(collectionPda, 'confirmed');
+        if (info && info.owner && info.owner.equals(COLLECTION_PROGRAM_ID)) {
+          return sendJson(res, 200, { already: true, collectionPda: collectionPda.toBase58() });
+        }
+      } catch {}
+
       const keys = [
         { pubkey: payerPk, isSigner: true, isWritable: true },
         { pubkey: ownerPk, isSigner: true, isWritable: false },
@@ -587,6 +1014,176 @@ export async function handleRequest(req, res) {
       return sendJson(res, 200, { tx: Buffer.from(serialized).toString('base64'), collectionPda: collectionPda.toBase58() });
     }
 
+    // Build tx to make an on-chain collection offer (escrows SOL in PDA)
+    if (pathname === '/api/offers/tx/make' && req.method === 'POST') {
+      const body = await getParsedBody(req);
+      const { collectionId, bidder, priceSol } = body || {};
+      if (!collectionId || !bidder) return sendJson(res, 400, { error: 'collectionId and bidder required' });
+      const dbh = await getDb();
+      const coll = await dbh.getCollectionById(collectionId);
+      if (!coll || !coll.onchain_pda) return sendJson(res, 400, { error: 'collection not on-chain or missing PDA' });
+      const priceLamports = Math.round(Number(priceSol || 0) * LAMPORTS_PER_SOL);
+      if (!priceLamports || priceLamports <= 0) return sendJson(res, 400, { error: 'priceSol must be > 0' });
+
+      const bidderPk = new PublicKey(bidder);
+      const collectionPda = new PublicKey(coll.onchain_pda);
+      const [offerPda] = PublicKey.findProgramAddressSync([Buffer.from('offer'), collectionPda.toBuffer(), bidderPk.toBuffer()], OFFERS_PROGRAM_ID);
+      const [vaultPda] = PublicKey.findProgramAddressSync([Buffer.from('vault'), collectionPda.toBuffer(), bidderPk.toBuffer()], OFFERS_PROGRAM_ID);
+      let vaultForIx = vaultPda;
+      try { const ai = await conn.getAccountInfo(vaultPda, 'confirmed'); if (!ai) vaultForIx = SystemProgram.programId; } catch {}
+      
+
+      const keys = [
+        { pubkey: bidderPk, isSigner: true, isWritable: true },
+        { pubkey: collectionPda, isSigner: false, isWritable: false },
+        { pubkey: vaultPda, isSigner: false, isWritable: true },
+        { pubkey: offerPda, isSigner: false, isWritable: true },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      ];
+      const data = Buffer.concat([anchorIxDisc('make_offer'), borshU64(priceLamports)]);
+      const ix = new TransactionInstruction({ keys, programId: OFFERS_PROGRAM_ID, data });
+      const tx = new Transaction();
+      tx.feePayer = bidderPk;
+      tx.add(ix);
+      const { blockhash } = await conn.getLatestBlockhash('finalized');
+      tx.recentBlockhash = blockhash;
+      const serialized = tx.serialize({ requireAllSignatures: false });
+      return sendJson(res, 200, { tx: Buffer.from(serialized).toString('base64'), offerPda: offerPda.toBase58(), vaultPda: vaultPda.toBase58() });
+    }
+
+    // Build tx to cancel an existing on-chain offer
+    if (pathname === '/api/offers/tx/cancel' && req.method === 'POST') {
+      const body = await getParsedBody(req);
+      const { collectionId, bidder } = body || {};
+      if (!collectionId || !bidder) return sendJson(res, 400, { error: 'collectionId and bidder required' });
+      const dbh = await getDb();
+      const coll = await dbh.getCollectionById(collectionId);
+      if (!coll || !coll.onchain_pda) return sendJson(res, 400, { error: 'collection not on-chain or missing PDA' });
+      const bidderPk = new PublicKey(bidder);
+      const collectionPda = new PublicKey(coll.onchain_pda);
+      const [offerPda] = PublicKey.findProgramAddressSync([Buffer.from('offer'), collectionPda.toBuffer(), bidderPk.toBuffer()], OFFERS_PROGRAM_ID);
+      const [vaultPda] = PublicKey.findProgramAddressSync([Buffer.from('vault'), collectionPda.toBuffer(), bidderPk.toBuffer()], OFFERS_PROGRAM_ID);
+      let vaultForIx = vaultPda;
+      try {
+        const ai = await conn.getAccountInfo(vaultPda, 'confirmed');
+        if (!ai) vaultForIx = SystemProgram.programId;
+      } catch {}
+
+      const keys = [
+        { pubkey: bidderPk, isSigner: true, isWritable: true },
+        { pubkey: collectionPda, isSigner: false, isWritable: false },
+        { pubkey: offerPda, isSigner: false, isWritable: true },
+        { pubkey: vaultForIx, isSigner: false, isWritable: true },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      ];
+      const data = Buffer.concat([anchorIxDisc('cancel_offer')]);
+      const ix = new TransactionInstruction({ keys, programId: OFFERS_PROGRAM_ID, data });
+      const tx = new Transaction();
+      tx.feePayer = bidderPk;
+      tx.add(ix);
+      const { blockhash } = await conn.getLatestBlockhash('finalized');
+      tx.recentBlockhash = blockhash;
+      const serialized = tx.serialize({ requireAllSignatures: false });
+      return sendJson(res, 200, { tx: Buffer.from(serialized).toString('base64'), offerPda: offerPda.toBase58(), vaultPda: vaultPda.toBase58() });
+    }
+
+    // Build tx to configure/update the Offers registry for a collection (sets accepted update_authority)
+    if (pathname === '/api/offers/tx/configure' && req.method === 'POST') {
+      const body = await getParsedBody(req);
+      const { collectionId, admin, owner } = body || {};
+      if (!collectionId || !admin || !owner) return sendJson(res, 400, { error: 'collectionId, admin, owner required' });
+      const dbh = await getDb();
+      const coll = await dbh.getCollectionById(collectionId);
+      if (!coll || !coll.onchain_pda) return sendJson(res, 400, { error: 'collection not on-chain or missing PDA' });
+      const adminPk = new PublicKey(admin);
+      const collectionPda = new PublicKey(coll.onchain_pda);
+      const [registryPda] = PublicKey.findProgramAddressSync([Buffer.from('registry'), collectionPda.toBuffer()], OFFERS_PROGRAM_ID);
+
+      const keys = [
+        { pubkey: adminPk, isSigner: true, isWritable: true },
+        { pubkey: collectionPda, isSigner: false, isWritable: false },
+        { pubkey: registryPda, isSigner: false, isWritable: true },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      ];
+      const data = Buffer.concat([anchorIxDisc('configure_collection'), borshPubkey(owner)]);
+      const ix = new TransactionInstruction({ keys, programId: OFFERS_PROGRAM_ID, data });
+      const tx = new Transaction();
+      tx.feePayer = adminPk;
+      tx.add(ix);
+      const { blockhash } = await conn.getLatestBlockhash('finalized');
+      tx.recentBlockhash = blockhash;
+      const serialized = tx.serialize({ requireAllSignatures: false });
+      return sendJson(res, 200, { tx: Buffer.from(serialized).toString('base64'), registryPda: registryPda.toBase58() });
+    }
+
+    // Build tx to accept an on-chain offer; Seller signs, SOL to seller, NFT to bidder.
+    if (pathname === '/api/offers/tx/accept' && req.method === 'POST') {
+      const body = await getParsedBody(req);
+      const { collectionId, bidder, seller, mint } = body || {};
+      if (!collectionId || !bidder || !seller || !mint) return sendJson(res, 400, { error: 'collectionId, bidder, seller, mint required' });
+      const dbh = await getDb();
+      const coll = await dbh.getCollectionById(collectionId);
+      if (!coll || !coll.onchain_pda) return sendJson(res, 400, { error: 'collection not on-chain or missing PDA' });
+      const sellerPk = new PublicKey(seller);
+      const bidderPk = new PublicKey(bidder);
+      const collectionPda = new PublicKey(coll.onchain_pda);
+      const mintPk = new PublicKey(mint);
+      const [offerPda] = PublicKey.findProgramAddressSync([Buffer.from('offer'), collectionPda.toBuffer(), bidderPk.toBuffer()], OFFERS_PROGRAM_ID);
+      const [vaultPda] = PublicKey.findProgramAddressSync([Buffer.from('vault'), collectionPda.toBuffer(), bidderPk.toBuffer()], OFFERS_PROGRAM_ID);
+
+      const [collectionAuth] = PublicKey.findProgramAddressSync([Buffer.from('auth'), collectionPda.toBuffer()], COLLECTION_PROGRAM_ID);
+      const sellerAta = await getAssociatedTokenAddress(mintPk, sellerPk);
+      const bidderAta = await getAssociatedTokenAddress(mintPk, bidderPk);
+      const metadataPda = findMetadataPda(mintPk);
+      const [registryPda] = PublicKey.findProgramAddressSync([Buffer.from('registry'), collectionPda.toBuffer()], OFFERS_PROGRAM_ID);
+
+      // Build a transaction that first configures the registry owner (idempotent),
+      // then accepts the offer. This avoids the common failure where the on-chain
+      // program rejects with MintNotFromCollection due to missing registry.owner.
+      // We set owner = collection deployer stored in DB (also the update authority
+      // for mints created by our collection program).
+      const tx = new Transaction();
+      tx.feePayer = sellerPk;
+
+      // Prepend configure instruction to set/update registry.owner (no admin check in program)
+      if (coll.owner) {
+        const cfgKeys = [
+          { pubkey: sellerPk, isSigner: true, isWritable: true },
+          { pubkey: collectionPda, isSigner: false, isWritable: false },
+          { pubkey: registryPda, isSigner: false, isWritable: true },
+          { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        ];
+        const cfgData = Buffer.concat([anchorIxDisc('configure_collection'), borshPubkey(coll.owner)]);
+        const cfgIx = new TransactionInstruction({ keys: cfgKeys, programId: OFFERS_PROGRAM_ID, data: cfgData });
+        tx.add(cfgIx);
+      }
+
+      const keys = [
+        { pubkey: sellerPk, isSigner: true, isWritable: true },
+        { pubkey: COLLECTION_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: collectionAuth, isSigner: false, isWritable: false },
+        { pubkey: collectionPda, isSigner: false, isWritable: false },
+        { pubkey: offerPda, isSigner: false, isWritable: true },
+        { pubkey: vaultPda, isSigner: false, isWritable: true },
+        { pubkey: bidderPk, isSigner: false, isWritable: true },
+        { pubkey: mintPk, isSigner: false, isWritable: false },
+        { pubkey: metadataPda, isSigner: false, isWritable: false },
+        { pubkey: registryPda, isSigner: false, isWritable: true },
+        { pubkey: sellerAta, isSigner: false, isWritable: true },
+        { pubkey: bidderAta, isSigner: false, isWritable: true },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      ];
+      const data = Buffer.concat([anchorIxDisc('accept_offer')]);
+      const ix = new TransactionInstruction({ keys, programId: OFFERS_PROGRAM_ID, data });
+      tx.add(ix);
+      const { blockhash } = await conn.getLatestBlockhash('finalized');
+      tx.recentBlockhash = blockhash;
+      const serialized = tx.serialize({ requireAllSignatures: false });
+      return sendJson(res, 200, { tx: Buffer.from(serialized).toString('base64'), offerPda: offerPda.toBase58(), vaultPda: vaultPda.toBase58() });
+    }
+
     // Program mint (Anchor) — mints via on-chain program with locked metadata
     if (pathname === '/api/tx/program-mint' && req.method === 'POST') {
       const body = await getParsedBody(req);
@@ -595,6 +1192,12 @@ export async function handleRequest(req, res) {
       const dbh = await getDb();
       const cfg = await dbh.getCollectionById(id);
       if (!cfg) return sendJson(res, 404, { error: 'collection not found' });
+      // Enforce mint window
+      const now = Math.floor(Date.now() / 1000);
+      const start = cfg.mintStartTs != null ? Number(cfg.mintStartTs) : null;
+      const end = cfg.mintEndTs != null ? Number(cfg.mintEndTs) : null;
+      if (start != null && now < start) return sendJson(res, 400, { error: 'mint not started', start, end });
+      if (end != null && now > end) return sendJson(res, 400, { error: 'mint ended', start, end });
       const payerPk = new PublicKey(payer);
       const ownerPk = new PublicKey(cfg.owner);
       const recPk = new PublicKey(recipient || payer);
@@ -635,6 +1238,65 @@ export async function handleRequest(req, res) {
         { pubkey: ata, isSigner: false, isWritable: true },
         { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
         { pubkey: new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL'), isSigner: false, isWritable: false },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        { pubkey: TOKEN_METADATA_PROGRAM_ID, isSigner: false, isWritable: false },
+      ];
+      const data = Buffer.concat([
+        anchorIxDisc('mint'),
+        (() => { const b=Buffer.alloc(8); b.writeBigUInt64LE(nonceU64); return b; })(),
+        Buffer.from([lock ? 1 : 0]),
+      ]);
+      const ix = new TransactionInstruction({ keys, programId: COLLECTION_PROGRAM_ID, data });
+      const tx = new Transaction();
+      tx.feePayer = payerPk;
+      tx.add(ix);
+      const { blockhash } = await conn.getLatestBlockhash('finalized');
+      tx.recentBlockhash = blockhash;
+      const serialized = tx.serialize({ requireAllSignatures: false });
+      return sendJson(res, 200, { tx: Buffer.from(serialized).toString('base64'), mint: mintPda.toBase58() });
+    }
+
+    // Program mint (direct) — build tx using a provided collection PDA (no DB read)
+    if (pathname === '/api/tx/program-mint-direct' && req.method === 'POST') {
+      const body = await getParsedBody(req);
+      const { payer, owner, recipient, collectionPda: collStr, nonce, lock = true } = body || {};
+      if (!payer || !owner || !collStr) return sendJson(res, 400, { error: 'payer, owner, collectionPda required' });
+      const payerPk = new PublicKey(payer);
+      const ownerPk = new PublicKey(owner);
+      const recPk = new PublicKey(recipient || payer);
+      const collectionPda = new PublicKey(collStr);
+
+      // Derive authority PDA ["auth", collectionPda]
+      const [authorityPda] = PublicKey.findProgramAddressSync([Buffer.from('auth'), collectionPda.toBuffer()], COLLECTION_PROGRAM_ID);
+
+      // Derive mint PDA using client-provided nonce
+      const nonceU64 = BigInt(Math.max(1, Number(nonce || Date.now() % 2**31)));
+      const nonceBuf = Buffer.alloc(8); nonceBuf.writeBigUInt64LE(nonceU64);
+      const [mintPda] = PublicKey.findProgramAddressSync([Buffer.from('mint'), collectionPda.toBuffer(), nonceBuf], COLLECTION_PROGRAM_ID);
+
+      // Metaplex PDAs
+      const [metadataPda] = PublicKey.findProgramAddressSync([
+        Buffer.from('metadata'), TOKEN_METADATA_PROGRAM_ID.toBuffer(), mintPda.toBuffer()
+      ], TOKEN_METADATA_PROGRAM_ID);
+      const [editionPda] = PublicKey.findProgramAddressSync([
+        Buffer.from('metadata'), TOKEN_METADATA_PROGRAM_ID.toBuffer(), mintPda.toBuffer(), Buffer.from('edition')
+      ], TOKEN_METADATA_PROGRAM_ID);
+
+      // Recipient ATA
+      const ata = await getAssociatedTokenAddress(mintPda, recPk);
+
+      const keys = [
+        { pubkey: payerPk, isSigner: true, isWritable: true },
+        { pubkey: ownerPk, isSigner: false, isWritable: true },
+        { pubkey: recPk, isSigner: false, isWritable: false },
+        { pubkey: collectionPda, isSigner: false, isWritable: true },
+        { pubkey: authorityPda, isSigner: false, isWritable: false },
+        { pubkey: mintPda, isSigner: false, isWritable: true },
+        { pubkey: metadataPda, isSigner: false, isWritable: true },
+        { pubkey: editionPda, isSigner: false, isWritable: true },
+        { pubkey: ata, isSigner: false, isWritable: true },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
         { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
         { pubkey: TOKEN_METADATA_PROGRAM_ID, isSigner: false, isWritable: false },
       ];
@@ -762,14 +1424,15 @@ export async function handleRequest(req, res) {
 
     if (pathname === '/api/deploy/config' && req.method === 'POST') {
       const body = await getParsedBody(req);
-      const { name, symbol, supply = 0, price = 0, imageCid, metadataUri, metadataGateway, owner, onchainPda } = body || {};
+      const { name, symbol, supply = 0, price = 0, imageCid, metadataUri, metadataGateway, owner, onchainPda, mintStartTs = null, mintEndTs = null } = body || {};
       if (!name || !symbol || !metadataUri || !owner) return sendJson(res, 400, { error: 'name, symbol, metadataUri, owner required' });
       const parsedSupply = Number(supply);
       if (!Number.isInteger(parsedSupply) || parsedSupply < 10 || parsedSupply > 100000) {
         return sendJson(res, 400, { error: 'supply must be an integer between 10 and 100000' });
       }
       const dbh = await getDb();
-      const id = await dbh.createCollection({ name, symbol, supply: parsedSupply, priceLamports: Math.round(Number(price || 0) * LAMPORTS_PER_SOL), imageCid, metadataUri, metadataGateway, owner, onchainPda });
+      const priceLamports = Math.max(0, Math.round(Number(price || 0) * LAMPORTS_PER_SOL));
+      const id = await dbh.createCollection({ name, symbol, supply: parsedSupply, priceLamports, imageCid, metadataUri, metadataGateway, owner, onchainPda, mintStartTs, mintEndTs });
       return sendJson(res, 200, { id });
     }
 
