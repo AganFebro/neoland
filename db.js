@@ -109,6 +109,22 @@ class FileDB {
         created_at: Number(c.created_at || 0),
       }));
   }
+  async searchCollectionsByName(name) {
+    const q = String(name || '').trim();
+    if (!q) return [];
+    const target = q.toLowerCase();
+    const cols = await this.getCollections();
+    return cols
+      .filter((c) => c.name && c.name.toLowerCase().includes(target))
+      .map((c) => ({
+        id: c.id,
+        name: c.name,
+        symbol: c.symbol,
+        image_gateway: c.image_gateway || null,
+        priceLamports: c.priceLamports,
+        limitOnePerWallet: !!c.limitOnePerWallet,
+      }));
+  }
   async getCollectionById(id) {
     await this._load();
     const c = this._db[id];
@@ -392,6 +408,22 @@ class SupabaseDB {
     if (error) throw error;
     return data.map((r) => this._mapColl(r));
   }
+  async searchCollectionsByName(name) {
+    const q = String(name || '').trim();
+    if (!q) return [];
+    const target = q.toLowerCase();
+    const cols = await this.getCollections();
+    return cols
+      .filter((c) => c.name && c.name.toLowerCase().includes(target))
+      .map((c) => ({
+        id: c.id,
+        name: c.name,
+        symbol: c.symbol,
+        image_gateway: c.image_gateway || null,
+        priceLamports: c.priceLamports,
+        limitOnePerWallet: !!c.limitOnePerWallet,
+      }));
+  }
   async getCollectionById(id) {
     const { data, error } = await this.sb
       .from('collections')
@@ -575,6 +607,44 @@ class SupabaseDB {
       if (r2.error) throw r2.error;
     }
     return true;
+  }
+  // Per-user encrypted wallets (Discord/Twitter/etc)
+  async getUserWallet({ id, platform, userId }) {
+    const pid = id || `${platform}:${userId}`;
+    const { data, error } = await this.sb
+      .from('user_wallets')
+      .select('*')
+      .eq('id', pid)
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) return null;
+    return {
+      id: data.id,
+      platform: data.platform,
+      userId: data.user_id,
+      username: data.username || null,
+      ownerPubkey: data.owner_pubkey,
+      secretCiphertext: data.secret_ciphertext,
+      createdAt: Number(data.created_at || 0),
+    };
+  }
+  async upsertUserWallet({ id, platform, userId, username, ownerPubkey, secretCiphertext, createdAt }) {
+    const row = {
+      id: id || `${platform}:${userId}`,
+      platform,
+      user_id: userId,
+      username: username || null,
+      owner_pubkey: ownerPubkey,
+      secret_ciphertext: secretCiphertext,
+      created_at: createdAt || nowTs(),
+    };
+    const { data, error } = await this.sb
+      .from('user_wallets')
+      .upsert(row, { onConflict: 'id' })
+      .select('*')
+      .maybeSingle();
+    if (error) throw error;
+    return data;
   }
 }
 
@@ -976,6 +1046,22 @@ class SQLiteDB {
     }
   }
   async getCollections() { return this.stmts.selAllColl.all().map((r) => this._mapColl(r)); }
+  async searchCollectionsByName(name) {
+    const q = String(name || '').trim();
+    if (!q) return [];
+    const target = q.toLowerCase();
+    const cols = await this.getCollections();
+    return cols
+      .filter((c) => c.name && c.name.toLowerCase().includes(target))
+      .map((c) => ({
+        id: c.id,
+        name: c.name,
+        symbol: c.symbol,
+        image_gateway: c.image_gateway || null,
+        priceLamports: c.priceLamports,
+        limitOnePerWallet: !!c.limitOnePerWallet,
+      }));
+  }
   async getCollectionById(id) { const r = this.stmts.selColl.get(id); return r ? this._mapColl(r, true) : null; }
   _mapColl(r, withArrays = false) {
     const mapped = {

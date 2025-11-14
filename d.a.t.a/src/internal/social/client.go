@@ -59,10 +59,26 @@ func (sc *SocialClientImpl) SendMessage(ctx context.Context, msg core.SocialMess
 	case "twitter":
 		return sc.twitterClient.Tweet(ctx, msg.Content)
 	case "discord":
+		// Optional DM routing: if Metadata["dm_user_id"] is set, send as a direct message
+		if uid, ok := msg.Metadata["dm_user_id"].(string); ok && uid != "" {
+			return sc.discordBot.SendDirectMessage(ctx, uid, msg.Content)
+		}
+		chID, _ := msg.Metadata["channel_id"].(string)
+		if chID == "" {
+			return fmt.Errorf("missing channel_id for discord message")
+		}
+		// For public replies, mention the requesting user by default so they get a ping.
+		content := msg.Content
+		if msg.FromUser != "" {
+			// Allow callers to suppress mention by setting no_mention=true in metadata.
+			if suppress, ok := msg.Metadata["no_mention"].(bool); !ok || !suppress {
+				content = fmt.Sprintf("<@%s> %s", msg.FromUser, msg.Content)
+			}
+		}
 		return sc.discordBot.SendMessage(ctx, &clients.DiscordMsg{
 			AuthorID:  msg.FromUser,
-			Content:   msg.Content,
-			ChannelID: msg.Metadata["channel_id"].(string),
+			Content:   content,
+			ChannelID: chID,
 		})
 	case "telegram":
 		return sc.telegramBot.BroadcastMessage(ctx, msg.Content)

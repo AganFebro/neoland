@@ -65,6 +65,9 @@ A simple, full‑stack NFT app for the CARV SVM network. It lets creators deploy
   - Default is local JSON/SQLite. For Supabase:
     - `SUPABASE_URL`
     - `SUPABASE_ANON_KEY`
+  - Optional per-user wallet storage (Supabase only):
+    - `BOT_FUNDER` – base58 secret key used to fund freshly created user wallets with 0.01 SOL
+    - `WALLET_ENC_KEY` – secret used to derive the AES-256-GCM key for encrypting wallet secrets (defaults to Supabase service key when present)
 - Royalties
   - `DEFAULT_ROYALTY_BPS` – Royalty is now set per collection by the creator
 

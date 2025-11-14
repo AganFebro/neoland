@@ -47,6 +47,9 @@ if (!process.env.PRIVATE_KEY_BASE58) {
 }
 
 const deployer = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY_BASE58));
+// Optional separate funder wallet for user funding
+const botFunderSecret = process.env.BOT_FUNDER || null;
+const botFunder = botFunderSecret ? Keypair.fromSecretKey(bs58.decode(botFunderSecret)) : null;
 const conn = new Connection(RPC, 'confirmed');
 
 // Token Metadata Program ID (constant)
@@ -142,6 +145,93 @@ function verifyEd25519({ addr, message, signature }) {
 
 function isValidSolAddress(addr) {
   try { const b = bs58.decode(String(addr)); return b && b.length === 32; } catch { return false; }
+}
+
+// Simple AES-256-GCM encryption for wallet secrets (stored in Supabase)
+const walletEncKeyRaw = process.env.WALLET_ENC_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_KEY || '';
+const walletEncKey = walletEncKeyRaw
+  ? crypto.createHash('sha256').update(walletEncKeyRaw).digest()
+  : null;
+
+function encryptWalletSecret(plain) {
+  if (!walletEncKey) throw new Error('WALLET_ENC_KEY (or Supabase key) not configured for wallet encryption');
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', walletEncKey, iv);
+  const enc = Buffer.concat([cipher.update(String(plain), 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return Buffer.concat([iv, tag, enc]).toString('base64');
+}
+
+function decryptWalletSecret(ciphertext) {
+  if (!walletEncKey) throw new Error('WALLET_ENC_KEY (or Supabase key) not configured for wallet decryption');
+  const buf = Buffer.from(String(ciphertext), 'base64');
+  if (buf.length < 28) throw new Error('ciphertext too short');
+  const iv = buf.subarray(0, 12);
+  const tag = buf.subarray(12, 28);
+  const data = buf.subarray(28);
+  const decipher = crypto.createDecipheriv('aes-256-gcm', walletEncKey, iv);
+  decipher.setAuthTag(tag);
+  const dec = Buffer.concat([decipher.update(data), decipher.final()]);
+  return dec.toString('utf8');
+}
+
+async function fundNewWalletIfNeeded(pubkeyBase58) {
+  if (!botFunder) return;
+  try {
+    const dest = new PublicKey(pubkeyBase58);
+    const lamports = Math.round(0.01 * LAMPORTS_PER_SOL);
+    const tx = new Transaction().add(SystemProgram.transfer({
+      fromPubkey: botFunder.publicKey,
+      toPubkey: dest,
+      lamports,
+    }));
+    tx.feePayer = botFunder.publicKey;
+    const { blockhash } = await conn.getLatestBlockhash('finalized');
+    tx.recentBlockhash = blockhash;
+    tx.sign(botFunder);
+    await conn.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 });
+  } catch (e) {
+    console.error('Failed to fund new wallet from BOT_FUNDER:', e?.message || e);
+  }
+}
+
+async function resolveOrCreateDiscordWallet(discordUserId) {
+  if (!discordUserId) return null;
+  const dbh = await getDb();
+  if (getDbType() !== 'supabase' || !dbh || typeof dbh.getUserWallet !== 'function') {
+    return null;
+  }
+  const platform = 'discord';
+  const userId = String(discordUserId);
+  const id = `${platform}:${userId}`;
+  let rec = await dbh.getUserWallet({ id, platform, userId });
+  if (rec && rec.ownerPubkey && rec.secretCiphertext) {
+    return rec;
+  }
+  // Create new wallet, encrypt secret, store, and fund from BOT_FUNDER
+  const kp = Keypair.generate();
+  const secretBase58 = bs58.encode(kp.secretKey);
+  const cipher = encryptWalletSecret(secretBase58);
+  const createdAt = Math.floor(Date.now() / 1000);
+  await dbh.upsertUserWallet({
+    id,
+    platform,
+    userId,
+    username: null,
+    ownerPubkey: kp.publicKey.toBase58(),
+    secretCiphertext: cipher,
+    createdAt,
+  });
+  await fundNewWalletIfNeeded(kp.publicKey.toBase58());
+  return {
+    id,
+    platform,
+    userId,
+    username: null,
+    ownerPubkey: kp.publicKey.toBase58(),
+    secretCiphertext: cipher,
+    createdAt,
+  };
 }
 
 function findMetadataPda(mint) {
@@ -372,6 +462,20 @@ function sendJson(res, code, obj) {
   res.end(body);
 }
 
+function checkDeployApiAuth(req) {
+  const expected = (process.env.DEPLOY_API_KEY || '').trim();
+  if (!expected) return true;
+  const header = req.headers && (req.headers.authorization || req.headers.Authorization);
+  if (!header || typeof header !== 'string') return false;
+  const m = header.match(/^Bearer\s+(.+)$/i);
+  if (!m) return false;
+  return m[1].trim() === expected;
+}
+
+function nowTs() {
+  return Math.floor(Date.now() / 1000);
+}
+
 // Anchor-style discriminator for "global:init_collection"
 function anchorIxDisc(name) {
   const ns = `global:${name}`;
@@ -507,6 +611,55 @@ export async function handleRequest(req, res) {
     // API routes
     if (pathname === '/api/config' && req.method === 'GET') {
       return sendJson(res, 200, { rpc: RPC, network: NETWORK, offersProgramId: OFFERS_PROGRAM_ID.toBase58(), collectionProgramId: COLLECTION_PROGRAM_ID.toBase58() });
+    }
+    // Internal: fetch or create a per-Discord-user wallet and return its public key.
+    if (pathname === '/api/discord/wallet' && req.method === 'POST') {
+      if (!checkDeployApiAuth(req)) {
+        return sendJson(res, 401, { error: 'unauthorized' });
+      }
+      const body = await getParsedBody(req);
+      const { discord_user_id } = body || {};
+      if (!discord_user_id) return sendJson(res, 400, { error: 'discord_user_id required' });
+      try {
+        const wallet = await resolveOrCreateDiscordWallet(discord_user_id);
+        if (!wallet || !wallet.ownerPubkey) {
+          return sendJson(res, 500, { error: 'failed to resolve wallet' });
+        }
+        return sendJson(res, 200, { pubkey: wallet.ownerPubkey });
+      } catch (e) {
+        console.error('discord wallet endpoint failed:', e?.message || e);
+        return sendJson(res, 500, { error: 'internal wallet error' });
+      }
+    }
+    // Public: search collections by (partial) name, returning ids and basic info.
+    if (pathname === '/api/collections/search' && req.method === 'GET') {
+      const { name } = query || {};
+      const q = String(name || '').trim();
+      if (!q) return sendJson(res, 400, { error: 'name required' });
+      const dbh = await getDb();
+      try {
+        let items = [];
+        if (typeof dbh.searchCollectionsByName === 'function') {
+          items = await dbh.searchCollectionsByName(q);
+        } else if (typeof dbh.getCollections === 'function') {
+          const cols = await dbh.getCollections();
+          const tgt = q.toLowerCase();
+          items = (cols || [])
+            .filter((c) => c.name && c.name.toLowerCase().includes(tgt))
+            .map((c) => ({
+              id: c.id,
+              name: c.name,
+              symbol: c.symbol,
+              image_gateway: c.image_gateway || null,
+              priceLamports: c.priceLamports,
+              limitOnePerWallet: !!c.limitOnePerWallet,
+            }));
+        }
+        return sendJson(res, 200, { items });
+      } catch (e) {
+        console.error('collections search failed:', e?.message || e);
+        return sendJson(res, 500, { error: 'search failed' });
+      }
     }
     // Pre-check if a collection PDA exists for { owner, symbol }
     if (pathname === '/api/collections/check-symbol' && req.method === 'POST') {
@@ -1113,6 +1266,159 @@ export async function handleRequest(req, res) {
       return sendJson(res, 200, { max: best, remaining });
     }
 
+    // Discord-only helper: mint NFTs for a user by collection id and quantity.
+    // Body: { id, discord_user_id, quantity?, currency? } where:
+    //   - id: collection id
+    //   - discord_user_id: Discord snowflake string
+    //   - quantity: how many to mint (default 1)
+    //   - currency: "SOL" or "CARV" (default "SOL")
+    if (pathname === '/api/discord/mint' && req.method === 'POST') {
+      if (!checkDeployApiAuth(req)) {
+        return sendJson(res, 401, { error: 'unauthorized' });
+      }
+      const body = await getParsedBody(req);
+      const { id, discord_user_id, quantity = 1, currency = 'SOL' } = body || {};
+      if (!id || !discord_user_id) {
+        return sendJson(res, 400, { error: 'id and discord_user_id required' });
+      }
+      const qty = Math.max(1, Number(quantity || 1) | 0);
+      const useCarv = String(currency || 'SOL').toUpperCase() === 'CARV';
+      const dbh = await getDb();
+      const cfg = await dbh.getCollectionById(id);
+      if (!cfg) return sendJson(res, 404, { error: 'collection not found' });
+      if (cfg.mint_paused) return sendJson(res, 400, { error: 'mint paused' });
+
+      // Enforce mint window if configured
+      const now = Math.floor(Date.now() / 1000);
+      const start = cfg.mintStartTs != null ? Number(cfg.mintStartTs) : null;
+      const end = cfg.mintEndTs != null ? Number(cfg.mintEndTs) : null;
+      if (start != null && now < start) return sendJson(res, 400, { error: 'mint not started', start, end });
+      if (end != null && now > end) return sendJson(res, 400, { error: 'mint ended', start, end });
+
+      const maxSupply = Number(cfg.supply ?? 0);
+      const mintedCount = Number(cfg.minted_count ?? 0);
+      if (maxSupply && mintedCount + qty > maxSupply) {
+        return sendJson(res, 400, { error: 'insufficient remaining supply for requested quantity' });
+      }
+
+      // Resolve per-user wallet and decrypt secret
+      let wallet;
+      try {
+        wallet = await resolveOrCreateDiscordWallet(discord_user_id);
+      } catch (e) {
+        console.error('resolveOrCreateDiscordWallet (discord/mint) failed:', e?.message || e);
+        return sendJson(res, 500, { error: 'failed to resolve wallet' });
+      }
+      if (!wallet || !wallet.ownerPubkey || !wallet.secretCiphertext) {
+        return sendJson(res, 500, { error: 'wallet not found for discord_user_id' });
+      }
+      let payerSecret;
+      try {
+        payerSecret = decryptWalletSecret(wallet.secretCiphertext);
+      } catch (e) {
+        console.error('decrypt wallet failed (discord/mint):', e?.message || e);
+        return sendJson(res, 500, { error: 'failed to decrypt wallet' });
+      }
+      let payerKp;
+      try {
+        let secretBytes = null;
+        try {
+          const arr = JSON.parse(payerSecret);
+          if (Array.isArray(arr)) secretBytes = Uint8Array.from(arr);
+        } catch {}
+        if (!secretBytes) {
+          const decoded = bs58.decode(String(payerSecret));
+          secretBytes = Uint8Array.from(decoded);
+        }
+        payerKp = Keypair.fromSecretKey(secretBytes);
+      } catch (e) {
+        console.error('rebuild payer keypair failed:', e?.message || e);
+        return sendJson(res, 500, { error: 'invalid stored wallet secret' });
+      }
+      const payerPk = payerKp.publicKey;
+
+      // If collection enforces 1-per-wallet, disallow quantity > 1 and check prior mint
+      if (cfg.limitOnePerWallet) {
+        if (qty > 1) {
+          return sendJson(res, 400, { error: 'this collection is limited to 1 mint per wallet' });
+        }
+        try {
+          if (await dbh.hasMintFromMinter(id, payerPk.toBase58())) {
+            return sendJson(res, 400, { error: 'wallet already minted' });
+          }
+        } catch {}
+      }
+
+      // Pre-compute CARV payment per mint if requested
+      const priceLamportsEach = Number(cfg.priceLamports || 0) || 0;
+      let paymentTokenMint = null;
+      let paymentAmountPer = 0;
+      if (useCarv && priceLamportsEach > 0) {
+        try {
+          const [solUsd, carvUsd] = await Promise.all([getSolUsd(), getCarvUsd()]);
+          if (!solUsd || !carvUsd) return sendJson(res, 400, { error: 'price quotes unavailable' });
+          const sol = priceLamportsEach / LAMPORTS_PER_SOL;
+          const carv = sol * solUsd / carvUsd;
+          paymentTokenMint = CARV_MINT.toBase58();
+          paymentAmountPer = Math.round(carv * 1_000_000_000);
+        } catch (e) {
+          return sendJson(res, 500, { error: 'failed to compute CARV price', detail: e?.message || String(e) });
+        }
+      }
+
+      const minted = [];
+      for (let i = 0; i < qty; i++) {
+        // Check remaining supply each loop
+        const curCfg = i === 0 ? cfg : await dbh.getCollectionById(id);
+        const curMinted = Number(curCfg.minted_count ?? 0);
+        if (maxSupply && curMinted + 1 > maxSupply) {
+          if (i === 0) return sendJson(res, 400, { error: 'sold out or insufficient remaining supply' });
+          break;
+        }
+        // Optional per-wallet check for subsequent mints on non-limited collections
+        if (cfg.limitOnePerWallet && i > 0) break;
+
+        const mintKp = Keypair.generate();
+        const perMintUri = resolveMetadataUriForMint(curCfg, mintKp.publicKey.toBase58());
+        const royaltyBps = Number(curCfg.royaltyBps || 0);
+        const creatorAddrs = [curCfg.owner || null].filter(Boolean);
+
+        const tx = await buildMintNftTx({
+          payer: payerPk.toBase58(),
+          mintPubkey: mintKp.publicKey.toBase58(),
+          name: curCfg.name || 'CARV NFT',
+          symbol: curCfg.symbol || 'CARV',
+          metadataUri: perMintUri || (curCfg.metadata_gateway || curCfg.metadata_uri),
+          paymentLamports: useCarv ? 0 : priceLamportsEach,
+          paymentTo: curCfg.owner || null,
+          finalUpdateAuthority: curCfg.owner || null,
+          finalIsMutable: !curCfg.lock_new_mints,
+          paymentTokenMint,
+          paymentAmount: paymentTokenMint ? paymentAmountPer : 0,
+          royaltyBps,
+          creatorAddrs,
+          collectionMint: curCfg.collection_mint || null,
+        });
+        tx.sign(payerKp, mintKp);
+        let sig;
+        try {
+          sig = await conn.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 });
+          try { await conn.confirmTransaction(sig, 'confirmed'); } catch {}
+        } catch (e) {
+          console.error('discord mint send failed:', e?.message || e);
+          return sendJson(res, 500, { error: 'failed to submit mint transaction', detail: e?.message || String(e) });
+        }
+        try {
+          await dbh.recordMint({ id, mint: mintKp.publicKey.toBase58(), minter: payerPk.toBase58(), ts: nowTs() });
+        } catch (e) {
+          console.error('recordMint failed (discord/mint):', e?.message || e);
+        }
+        minted.push({ mint: mintKp.publicKey.toBase58(), signature: sig });
+      }
+
+      return sendJson(res, 200, { ok: true, minted, payer: payerPk.toBase58() });
+    }
+
     // Atomic create-collection + build mint tx (avoids cross-request persistence issues)
     // Note: This endpoint persists the collection BEFORE the wallet signs.
     // Frontend should prefer /api/tx/mint-direct to avoid persisting on user cancel.
@@ -1224,8 +1530,26 @@ export async function handleRequest(req, res) {
     // Build tx to initialize on-chain collection PDA via our Anchor program
     if (pathname === '/api/tx/init-collection' && req.method === 'POST') {
       const body = await getParsedBody(req);
-      const { payer, owner, name, symbol, metadataUri, price = 0, supply = 0, collectionMetaUri = null } = body || {};
-      if (!payer || !owner || !name || !symbol || !metadataUri) return sendJson(res, 400, { error: 'payer, owner, name, symbol, metadataUri required' });
+      let { payer, owner, name, symbol, metadataUri, price = 0, supply = 0, collectionMetaUri = null, discord_user_id } = body || {};
+
+      // If payer/owner not provided but a Discord user is, resolve or create a per-user wallet.
+      if ((!payer || !owner) && discord_user_id) {
+        try {
+          const wallet = await resolveOrCreateDiscordWallet(discord_user_id);
+          if (wallet && wallet.ownerPubkey) {
+            payer = payer || wallet.ownerPubkey;
+            owner = owner || wallet.ownerPubkey;
+          }
+        } catch (e) {
+          console.error('resolveOrCreateDiscordWallet failed:', e?.message || e);
+        }
+      }
+
+      if (!payer) payer = process.env.DEPLOY_PAYER;
+      if (!owner) owner = process.env.DEPLOY_OWNER;
+      if (!payer || !owner || !name || !symbol || !metadataUri) {
+        return sendJson(res, 400, { error: 'payer, owner, name, symbol, metadataUri required' });
+      }
 
       const payerPk = new PublicKey(payer);
       const ownerPk = new PublicKey(owner);
@@ -1351,10 +1675,26 @@ export async function handleRequest(req, res) {
     // Submit a base64-encoded transaction after client-side signing
     if (pathname === '/api/tx/submit' && req.method === 'POST') {
       const body = await getParsedBody(req);
-      const { tx: txB64, secret } = body || {};
-      if (!txB64 || !secret) return sendJson(res, 400, { error: 'tx and secret required' });
+      let { tx: txB64, secret, discord_user_id } = body || {};
+      if (!txB64) return sendJson(res, 400, { error: 'tx required' });
+
+      // For Discord flows, resolve encrypted wallet from Supabase instead of requiring raw secret.
+      if (!secret && discord_user_id) {
+        try {
+          const wallet = await resolveOrCreateDiscordWallet(discord_user_id);
+          if (!wallet || !wallet.secretCiphertext) {
+            return sendJson(res, 400, { error: 'wallet not found for discord_user_id' });
+          }
+          secret = decryptWalletSecret(wallet.secretCiphertext);
+        } catch (e) {
+          console.error('resolve wallet for submit failed:', e?.message || e);
+          return sendJson(res, 500, { error: 'failed to resolve wallet' });
+        }
+      }
+
+      if (!secret) return sendJson(res, 400, { error: 'secret or discord_user_id required' });
+
       try {
-        const { Transaction, Keypair } = await import('https://esm.sh/@solana/web3.js@1.98.0');
         let secretBytes = null;
         if (Array.isArray(secret)) {
           secretBytes = Uint8Array.from(secret);
@@ -1366,21 +1706,21 @@ export async function handleRequest(req, res) {
           } catch {}
           if (!secretBytes) {
             // Try base58
-            const bs58 = (await import('https://esm.sh/bs58@5.0.0')).default;
             const decoded = bs58.decode(secret);
             secretBytes = Uint8Array.from(decoded);
           }
         }
         if (!secretBytes || secretBytes.length < 64) return sendJson(res, 400, { error: 'invalid secret' });
         const kp = Keypair.fromSecretKey(secretBytes);
-        const buf = Uint8Array.from(atob(txB64), c => c.charCodeAt(0));
+        const buf = Buffer.from(String(txB64), 'base64');
         const tx = Transaction.from(buf);
         tx.partialSign(kp);
         const sig = await conn.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 });
         try { await conn.confirmTransaction(sig, 'confirmed'); } catch {}
         return sendJson(res, 200, { signature: sig });
       } catch (e) {
-        return sendJson(res, 500, { error: 'failed to submit tx' });
+        console.error('submit tx failed:', e?.message || e);
+        return sendJson(res, 500, { error: 'failed to submit tx', detail: e?.message || String(e) });
       }
     }
 
@@ -1930,8 +2270,24 @@ export async function handleRequest(req, res) {
 
     if (pathname === '/api/deploy/config' && req.method === 'POST') {
       const body = await getParsedBody(req);
-      const { name, symbol, supply = 0, price = 0, imageCid, metadataUri, metadataGateway, owner, onchainPda, mintStartTs = null, mintEndTs = null, royaltyBps = null, limitOnePerWallet = false } = body || {};
-      if (!name || !symbol || !metadataUri || !owner) return sendJson(res, 400, { error: 'name, symbol, metadataUri, owner required' });
+      let { name, symbol, supply = 0, price = 0, imageCid, metadataUri, metadataGateway, owner, onchainPda, mintStartTs = null, mintEndTs = null, royaltyBps = null, limitOnePerWallet = false, discord_user_id } = body || {};
+      if (!name || !symbol || !metadataUri) {
+        return sendJson(res, 400, { error: 'name, symbol, metadataUri required' });
+      }
+      // If we have a Discord user id, resolve or create a per-user wallet and prefer it as owner
+      if (discord_user_id) {
+        try {
+          const wallet = await resolveOrCreateDiscordWallet(discord_user_id);
+          if (wallet && wallet.ownerPubkey) {
+            owner = wallet.ownerPubkey;
+          }
+        } catch (e) {
+          console.error('resolveOrCreateDiscordWallet (deploy/config) failed:', e?.message || e);
+        }
+      }
+      if (!owner) {
+        return sendJson(res, 400, { error: 'owner required' });
+      }
       const parsedSupply = Number(supply);
       if (!Number.isInteger(parsedSupply) || parsedSupply < 10 || parsedSupply > 100000) {
         return sendJson(res, 400, { error: 'supply must be an integer between 10 and 100000' });

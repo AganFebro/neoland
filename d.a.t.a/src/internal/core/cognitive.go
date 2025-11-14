@@ -11,6 +11,7 @@ import (
 	"github.com/carv-protocol/d.a.t.a/src/characters"
 	"github.com/carv-protocol/d.a.t.a/src/internal/actions"
 	"github.com/carv-protocol/d.a.t.a/src/internal/conf"
+	"github.com/carv-protocol/d.a.t.a/src/pkg/deploy"
 	"github.com/carv-protocol/d.a.t.a/src/pkg/llm"
 	"github.com/carv-protocol/d.a.t.a/src/pkg/logger"
 
@@ -551,6 +552,219 @@ func (e *CognitiveEngine) GenerateDeploySummary(
 			"- If failure: be honest but kind, say that something went wrong on the backend, and suggest they try again later or ping the devs.\n"+
 			"Do not expose raw error messages or stack traces.",
 		status, name, symbol, mintPrice, supply, mintLink, msg.Content,
+	)
+
+	out, genErr := e.llm.CreateCompletion(ctx, llm.CompletionRequest{
+		Model: e.model,
+		Messages: []llm.Message{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: userPrompt},
+		},
+	})
+	if genErr != nil {
+		return "", genErr
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// GenerateMintSummary asks the LLM to summarize a successful mint action
+// triggered from Discord, including how many items were minted and from which collection.
+func (e *CognitiveEngine) GenerateMintSummary(
+	ctx context.Context,
+	msg *SocialMessage,
+	collectionID string,
+	quantity int,
+	currency string,
+	payer string,
+	mintedCount int,
+	lastMint string,
+) (string, error) {
+	if e.llm == nil {
+		return "", fmt.Errorf("llm client not initialized")
+	}
+
+	state := &SystemState{
+		Character: e.character,
+	}
+
+	systemPrompt := buildSystemPrompt(state, nil, e.promptTemplates)
+	userPrompt := fmt.Sprintf(
+		"A Discord user asked me (neobot) to mint NFTs from an existing collection.\n\n"+
+			"Mint context:\n- Collection ID: %s\n- Quantity: %d\n- Currency: %s\n- Payer wallet: %s\n- Last minted mint (if any): %s\n\n"+
+			"Original user message:\n%s\n\n"+
+			"Task: In 2–4 short lines, write a playful, friendly summary in character that:\n"+
+			"- Confirms how many NFTs were minted and from which collection id\n"+
+			"- Mentions which currency was used (SOL vs CARV)\n"+
+			"- Shows the payer wallet so they know where to top up funds\n"+
+			"- Optionally mentions the last minted mint address if helpful.\n"+
+			"- Do NOT mention or invent any Discord user IDs; the platform will mention the user separately.\n"+
+			"Do not expose internal errors or stack traces.",
+		collectionID, quantity, currency, payer, lastMint, msg.Content,
+	)
+
+	out, genErr := e.llm.CreateCompletion(ctx, llm.CompletionRequest{
+		Model: e.model,
+		Messages: []llm.Message{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: userPrompt},
+		},
+	})
+	if genErr != nil {
+		return "", genErr
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// GenerateMintBalanceErrorMessage explains that a mint failed due to
+// insufficient balance and suggests topping up funds.
+func (e *CognitiveEngine) GenerateMintBalanceErrorMessage(
+	ctx context.Context,
+	msg *SocialMessage,
+	currency string,
+) (string, error) {
+	if e.llm == nil {
+		return "", fmt.Errorf("llm client not initialized")
+	}
+
+	state := &SystemState{
+		Character: e.character,
+	}
+	systemPrompt := buildSystemPrompt(state, nil, e.promptTemplates)
+
+	userPrompt := fmt.Sprintf(
+		"A Discord user asked me (neobot) to mint an NFT, but the transaction failed because their wallet does not have enough %s (or SOL for fees).\n\n"+
+			"Original user message:\n%s\n\n"+
+			"Task: In 1–3 short lines, reply in character:\n"+
+			"- Clearly say that the mint failed due to insufficient balance.\n"+
+			"- Mention which token they probably need to top up (use %s in your wording, but also mention network fees if relevant).\n"+
+			"- Encourage them to fund the wallet and try again, without exposing any internal error text.",
+		currency, msg.Content, currency,
+	)
+
+	out, genErr := e.llm.CreateCompletion(ctx, llm.CompletionRequest{
+		Model: e.model,
+		Messages: []llm.Message{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: userPrompt},
+		},
+	})
+	if genErr != nil {
+		return "", genErr
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// GenerateWalletAddressSummary asks the LLM to present a user's wallet
+// address in-character, while keeping the address itself exact.
+func (e *CognitiveEngine) GenerateWalletAddressSummary(
+	ctx context.Context,
+	msg *SocialMessage,
+	addr string,
+) (string, error) {
+	if e.llm == nil {
+		return "", fmt.Errorf("llm client not initialized")
+	}
+
+	state := &SystemState{
+		Character: e.character,
+	}
+	systemPrompt := buildSystemPrompt(state, nil, e.promptTemplates)
+
+	userPrompt := fmt.Sprintf(
+		"A Discord user asked me (neobot) what their wallet address is so they can top up SOL/CARV.\n\n"+
+			"Their wallet address is:\n%s\n\n"+
+			"Original user message:\n%s\n\n"+
+			"Task: In 1–3 short lines, reply in character.\n"+
+			"- Clearly show the address in backticks so they can copy it.\n"+
+			"- Mention they can top up SOL or CARV there.\n"+
+			"- Explicitly say you never show other people's addresses.\n"+
+			"Do NOT invent or change the address.",
+		addr, msg.Content,
+	)
+
+	out, genErr := e.llm.CreateCompletion(ctx, llm.CompletionRequest{
+		Model: e.model,
+		Messages: []llm.Message{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: userPrompt},
+		},
+	})
+	if genErr != nil {
+		return "", genErr
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// GenerateWalletPrivacyMessage explains that the bot will not reveal
+// other people's wallet addresses and only shows the caller's own wallet.
+func (e *CognitiveEngine) GenerateWalletPrivacyMessage(
+	ctx context.Context,
+	msg *SocialMessage,
+) (string, error) {
+	if e.llm == nil {
+		return "", fmt.Errorf("llm client not initialized")
+	}
+
+	state := &SystemState{
+		Character: e.character,
+	}
+	systemPrompt := buildSystemPrompt(state, nil, e.promptTemplates)
+
+	userPrompt := fmt.Sprintf(
+		"A Discord user asked me (neobot) for someone else's wallet address, or for a wallet address that is not clearly their own.\n\n"+
+			"User message:\n%s\n\n"+
+			"Task: In 1–3 short lines, reply in character:\n"+
+			"- Politely refuse to share other people's wallet addresses for privacy and security reasons.\n"+
+			"- Mention that I can show *their* own minting wallet on request (e.g., \"what is my wallet address?\").\n"+
+			"- Do NOT invent or expose any actual wallet address in this reply.",
+		msg.Content,
+	)
+
+	out, genErr := e.llm.CreateCompletion(ctx, llm.CompletionRequest{
+		Model: e.model,
+		Messages: []llm.Message{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: userPrompt},
+		},
+	})
+	if genErr != nil {
+		return "", genErr
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// GenerateCollectionLookupSummary asks the LLM to present one or more
+// matching collections and their ids in-character without inventing data.
+func (e *CognitiveEngine) GenerateCollectionLookupSummary(
+	ctx context.Context,
+	msg *SocialMessage,
+	query string,
+	items []deploy.CollectionSearchItem,
+) (string, error) {
+	if e.llm == nil {
+		return "", fmt.Errorf("llm client not initialized")
+	}
+
+	state := &SystemState{
+		Character: e.character,
+	}
+	systemPrompt := buildSystemPrompt(state, nil, e.promptTemplates)
+
+	var b strings.Builder
+	for _, it := range items {
+		b.WriteString(fmt.Sprintf("- id: %s | name: %s | symbol: %s\n", it.ID, it.Name, it.Symbol))
+	}
+
+	userPrompt := fmt.Sprintf(
+		"A Discord user asked me (neobot) for the collection id of an NFT collection.\n\n"+
+			"User query text (normalized name): %q\n\n"+
+			"Matching collections (id / name / symbol):\n%s\n"+
+			"Original user message:\n%s\n\n"+
+			"Task: In 1–4 short lines, reply in character:\n"+
+			"- If there is exactly one match: clearly show the collection id in backticks and repeat the name/symbol.\n"+
+			"- If there are multiple matches: list each id on its own bullet with name and symbol so the user can choose.\n"+
+			"- Make sure you ONLY use the ids and names from the list above; do NOT invent new ids or collections.",
+		query, b.String(), msg.Content,
 	)
 
 	out, genErr := e.llm.CreateCompletion(ctx, llm.CompletionRequest{

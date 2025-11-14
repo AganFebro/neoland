@@ -1,4 +1,3 @@
-[README.md](https://github.com/user-attachments/files/23545296/README.md)
 # neobot – Discord NFT Deploy Bot (CARV D.A.T.A)
 
 > A Discord bot that lets you deploy NFT collections to your neoland backend using natural language, powered by the CARV D.A.T.A framework.

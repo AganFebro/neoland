@@ -92,6 +92,18 @@ create table if not exists public.market_activity (
 );
 create index if not exists market_activity_coll_idx on public.market_activity(collection_id, ts desc);
 
+-- Per-user wallets (for Discord/Twitter/etc), secrets stored encrypted
+create table if not exists public.user_wallets (
+  id text primary key,
+  platform text not null,
+  user_id text not null,
+  username text,
+  owner_pubkey text not null,
+  secret_ciphertext text not null,
+  created_at bigint not null
+);
+create index if not exists user_wallets_platform_user_idx on public.user_wallets(platform, user_id);
+
 -- Optional helper RPCs
 -- Increase minted_count
 create or replace function public.inc_minted_count(p_id text)

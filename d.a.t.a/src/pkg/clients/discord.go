@@ -55,6 +55,20 @@ func (dc *DiscordBot) SendMessage(
 	return err
 }
 
+// SendDirectMessage sends a private DM to the given user.
+func (dc *DiscordBot) SendDirectMessage(
+	ctx context.Context,
+	userID string,
+	content string,
+) error {
+	ch, err := dc.session.UserChannelCreate(userID)
+	if err != nil {
+		return err
+	}
+	_, err = dc.session.ChannelMessageSend(ch.ID, content)
+	return err
+}
+
 func MessageListener(
 	msgChannel chan<- DiscordMsg,
 ) func(*discordgo.Session, *discordgo.MessageCreate) {

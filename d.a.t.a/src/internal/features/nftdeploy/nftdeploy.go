@@ -18,6 +18,14 @@ type Params struct {
     Supply    int
 }
 
+// MintParams holds parsed fields for a mint request
+// initiated via Discord (not a deploy).
+type MintParams struct {
+    CollectionID string
+    Quantity     int
+    Currency     string // "SOL" or "CARV"
+}
+
 // TryExtractParamsFast tries to parse fields using simple patterns first
 func TryExtractParamsFast(text string) (Params, bool) {
     src := normalizeQuotes(text)
@@ -52,6 +60,100 @@ func TryExtractParamsFast(text string) (Params, bool) {
     }
 
     ok := p.Name != "" && p.Symbol != "" && priceSet && p.MintPrice >= 0 && p.Supply > 0
+    return p, ok
+}
+
+// TryExtractMintParamsFast tries to detect a mint intent and extract
+// collection id, quantity, and currency using simple patterns.
+// It is intentionally conservative to avoid mis-classifying deploy requests.
+func TryExtractMintParamsFast(text string) (MintParams, bool) {
+    src := normalizeQuotes(text)
+    lower := strings.ToLower(src)
+    // Quick intent check: must mention "mint"
+    if !strings.Contains(lower, "mint") {
+        return MintParams{}, false
+    }
+    // If the user explicitly says "deploy" or "launch", treat as deploy, not mint.
+    if strings.Contains(lower, "deploy") || strings.Contains(lower, "launch") {
+        return MintParams{}, false
+    }
+
+    // Prefer explicit "collection id" pattern first
+    reCollID := regexp.MustCompile(`(?i)collection\s*id\s*[:=]?\s*([A-Za-z0-9_-]+)`)
+    var p MintParams
+    if m := reCollID.FindStringSubmatch(src); len(m) >= 2 {
+        p.CollectionID = strings.TrimSpace(m[1])
+    }
+
+    // If not found, accept "collection <id>" (e.g., "this collection w1wbbuqp")
+    if p.CollectionID == "" {
+        reColl := regexp.MustCompile(`(?i)collection\s+([A-Za-z][A-Za-z0-9_-]{3,})`)
+        if m := reColl.FindStringSubmatch(src); len(m) >= 2 {
+            p.CollectionID = strings.TrimSpace(m[1])
+        }
+    }
+
+    // As a next step, look for an id-like token immediately after "mint" / "mint this"
+    if p.CollectionID == "" {
+        reMintID := regexp.MustCompile(`(?i)mint(?:\s+this|\s+collection|\s+from|\s+id|\s+the)?\s+([A-Za-z][A-Za-z0-9_-]{3,})`)
+        if m := reMintID.FindStringSubmatch(src); len(m) >= 2 {
+            p.CollectionID = strings.TrimSpace(m[1])
+        }
+    }
+
+    // Final fallback: take the last id-like token in the message that looks
+    // like a collection id (e.g., "mint this NFT 6z6dfl69").
+    if p.CollectionID == "" {
+        reID := regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{3,}$`)
+        tokens := strings.FieldsFunc(src, func(r rune) bool {
+            switch r {
+            case ' ', '\t', '\n', '\r', ',', '.', '!', '?':
+                return true
+            default:
+                return false
+            }
+        })
+        ignore := map[string]struct{}{
+            "nft":        {},
+            "sol":        {},
+            "carv":       {},
+            "collection": {},
+            "id":         {},
+        }
+        for i := len(tokens) - 1; i >= 0; i-- {
+            t := strings.Trim(tokens[i], "\"'`")
+            if len(t) < 4 {
+                continue
+            }
+            if _, skip := ignore[strings.ToLower(t)]; skip {
+                continue
+            }
+            if reID.MatchString(t) {
+                p.CollectionID = t
+                break
+            }
+        }
+    }
+
+    // Quantity: first positive integer, default 1
+    reQty := regexp.MustCompile(`\b(\d+)\b`)
+    if m := reQty.FindStringSubmatch(src); len(m) >= 2 {
+        if n, err := strconv.Atoi(m[1]); err == nil && n > 0 {
+            p.Quantity = n
+        }
+    }
+    if p.Quantity <= 0 {
+        p.Quantity = 1
+    }
+
+    if strings.Contains(lower, "carv") {
+        p.Currency = "CARV"
+    } else {
+        p.Currency = "SOL"
+    }
+
+    // Only treat as mint if we have a plausible collection id.
+    ok := p.CollectionID != ""
     return p, ok
 }
 

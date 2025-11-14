@@ -2,17 +2,18 @@
 package core
 
 import (
-    "context"
-    "fmt"
-    "time"
-    "strings"
+	"context"
+	"fmt"
+	"regexp"
+	"strings"
+	"time"
 
-    "github.com/carv-protocol/d.a.t.a/src/characters"
-    "github.com/carv-protocol/d.a.t.a/src/internal/actions"
-    "github.com/carv-protocol/d.a.t.a/src/internal/features/nftdeploy"
-    "github.com/carv-protocol/d.a.t.a/src/internal/plugins"
-    "github.com/carv-protocol/d.a.t.a/src/pkg/deploy"
-    "github.com/carv-protocol/d.a.t.a/src/pkg/logger"
+	"github.com/carv-protocol/d.a.t.a/src/characters"
+	"github.com/carv-protocol/d.a.t.a/src/internal/actions"
+	"github.com/carv-protocol/d.a.t.a/src/internal/features/nftdeploy"
+	"github.com/carv-protocol/d.a.t.a/src/internal/plugins"
+	"github.com/carv-protocol/d.a.t.a/src/pkg/deploy"
+	"github.com/carv-protocol/d.a.t.a/src/pkg/logger"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -215,43 +216,80 @@ func (a *Agent) processMessage(msg *SocialMessage) error {
         }
     }
 
-    // Fast path: Discord NFT deploy intent -> call deploy API
-    if msg.Platform == "discord" && a.deployClient != nil {
-        if params, ok := nftdeploy.TryExtractParamsFast(msg.Content); ok {
-            a.logger.Infow("NFT fast-parse succeeded", "name", params.Name, "symbol", params.Symbol, "price", params.MintPrice, "supply", params.Supply)
-            if err = a.handleNFTDeploy(msg, params); err == nil {
+    // Fast path: Discord wallet + NFT intents -> call deploy/mint APIs
+    if msg.Platform == "discord" {
+        lower := strings.ToLower(msg.Content)
+
+        // Simple wallet address query for the caller: "what is my wallet/address"
+        if strings.Contains(lower, "wallet") && strings.Contains(lower, "my") && a.deployClient != nil {
+            if err = a.handleWalletAddressQuery(msg); err == nil {
                 return nil
             }
-            a.logger.Errorw("NFT deploy via fast-parse failed", "error", err)
-        } else {
-            a.logger.Infoln("NFT fast-parse not conclusive; falling back to LLM parse")
-            // Fallback to LLM extraction to be more flexible (including free/0 mint)
-            if p2, ok2, e2 := nftdeploy.ExtractParamsLLM(a.ctx, a.cognitive.Client(), a.cognitive.Model(), msg.Content); e2 == nil && ok2 {
-                a.logger.Infow("NFT LLM-parse succeeded", "name", p2.Name, "symbol", p2.Symbol, "price", p2.MintPrice, "supply", p2.Supply)
-                if err = a.handleNFTDeploy(msg, p2); err == nil {
+            a.logger.Errorw("wallet address handler failed", "error", err)
+        } else if strings.Contains(lower, "wallet") {
+            // Likely asking for someone else's wallet or a generic wallet lookup:
+            // respond with a privacy-friendly message instead of trying to fetch.
+            if err = a.handleWalletPrivacyQuery(msg); err == nil {
+                return nil
+            }
+            a.logger.Errorw("wallet privacy handler failed", "error", err)
+        }
+
+        if a.deployClient != nil {
+            // Simple collection id lookup: "collection id for X"
+            if strings.Contains(lower, "collection id") && strings.Contains(lower, " for ") {
+                if err = a.handleCollectionLookup(msg); err == nil {
                     return nil
                 }
-                a.logger.Errorw("NFT deploy via LLM-parse failed", "error", err)
-            } else if e2 != nil {
-                a.logger.Errorw("NFT LLM-parse error", "error", e2)
-            } else {
-                // Still looks like a deploy intent but missing fields; guide the user
-                lower := strings.ToLower(msg.Content)
-                if strings.Contains(lower, "deploy") || strings.Contains(lower, "launch") {
-                    // Ask the LLM to produce a helpful clarification message
-                    guidance := "I see you want to deploy an NFT, but I need: name, symbol, mint price (in SOL), and supply. Example: name: \"Neo Badge\" symbol: NEOB mint: 0.02 supply: 1000."
-                    if a.cognitive != nil {
-                        if g, gErr := a.cognitive.GenerateClarificationMessage(a.ctx, msg, "deploy_nft_missing_fields"); gErr == nil && strings.TrimSpace(g) != "" {
-                            guidance = g
-                        }
-                    }
-                    _ = a.socialClient.SendMessage(a.ctx, SocialMessage{
-                        Platform: msg.Platform,
-                        Type:     "Response",
-                        Content:  guidance,
-                        Metadata: msg.Metadata,
-                    })
+                a.logger.Errorw("collection lookup handler failed", "error", err)
+            }
+
+            // Discord mint intent
+            if mintParams, ok := nftdeploy.TryExtractMintParamsFast(msg.Content); ok {
+                a.logger.Infow("NFT mint fast-parse succeeded", "collection_id", mintParams.CollectionID, "quantity", mintParams.Quantity, "currency", mintParams.Currency)
+                if err = a.handleNFTMint(msg, mintParams); err == nil {
                     return nil
+                }
+                a.logger.Errorw("NFT mint via fast-parse failed", "error", err)
+            }
+
+            // Discord deploy intent
+            if params, ok := nftdeploy.TryExtractParamsFast(msg.Content); ok {
+                a.logger.Infow("NFT fast-parse succeeded", "name", params.Name, "symbol", params.Symbol, "price", params.MintPrice, "supply", params.Supply)
+                if err = a.handleNFTDeploy(msg, params); err == nil {
+                    return nil
+                }
+                a.logger.Errorw("NFT deploy via fast-parse failed", "error", err)
+            } else {
+                a.logger.Infoln("NFT fast-parse not conclusive; falling back to LLM parse")
+                // Fallback to LLM extraction to be more flexible (including free/0 mint)
+                if p2, ok2, e2 := nftdeploy.ExtractParamsLLM(a.ctx, a.cognitive.Client(), a.cognitive.Model(), msg.Content); e2 == nil && ok2 {
+                    a.logger.Infow("NFT LLM-parse succeeded", "name", p2.Name, "symbol", p2.Symbol, "price", p2.MintPrice, "supply", p2.Supply)
+                    if err = a.handleNFTDeploy(msg, p2); err == nil {
+                        return nil
+                    }
+                    a.logger.Errorw("NFT deploy via LLM-parse failed", "error", err)
+                } else if e2 != nil {
+                    a.logger.Errorw("NFT LLM-parse error", "error", e2)
+                } else {
+                    // Still looks like a deploy intent but missing fields; guide the user
+                    lower := strings.ToLower(msg.Content)
+                    if strings.Contains(lower, "deploy") || strings.Contains(lower, "launch") {
+                        // Ask the LLM to produce a helpful clarification message
+                        guidance := "I see you want to deploy an NFT, but I need: name, symbol, mint price (in SOL), and supply. Example: name: \"Neo Badge\" symbol: NEOB mint: 0.02 supply: 1000."
+                        if a.cognitive != nil {
+                            if g, gErr := a.cognitive.GenerateClarificationMessage(a.ctx, msg, "deploy_nft_missing_fields"); gErr == nil && strings.TrimSpace(g) != "" {
+                                guidance = g
+                            }
+                        }
+                        _ = a.socialClient.SendMessage(a.ctx, SocialMessage{
+                            Platform: msg.Platform,
+                            Type:     "Response",
+                            Content:  guidance,
+                            Metadata: msg.Metadata,
+                        })
+                        return nil
+                    }
                 }
             }
         }
@@ -440,6 +478,7 @@ func (a *Agent) handleNFTDeploy(msg *SocialMessage, p nftdeploy.Params) error {
         MetadataUri: metaURI,
         MetadataGateway: metaGateway,
         Owner: a.deployClient.DefaultOwner,
+        DiscordUserID: msg.FromUser,
     }); err2 == nil {
         base := strings.TrimRight(a.deployClient.BaseURL, "/")
         slug := deploy.Slugify(p.Name)
@@ -479,9 +518,256 @@ func (a *Agent) handleNFTDeploy(msg *SocialMessage, p nftdeploy.Params) error {
     return a.socialClient.SendMessage(a.ctx, SocialMessage{
         Platform: msg.Platform,
         Type:     "Response",
+        FromUser: msg.FromUser,
         Content:  reply,
         Metadata: msg.Metadata,
     })
+}
+
+// handleNFTMint orchestrates the Discord mint helper endpoint and response messaging.
+func (a *Agent) handleNFTMint(msg *SocialMessage, p nftdeploy.MintParams) error {
+    if a.deployClient == nil {
+        return fmt.Errorf("deploy client not configured")
+    }
+    // Use SOL by default unless user explicitly requested CARV.
+    currency := p.Currency
+    if currency != "CARV" {
+        currency = "SOL"
+    }
+    resp, err := a.deployClient.DiscordMint(a.ctx, p.CollectionID, msg.FromUser, p.Quantity, currency)
+    if err != nil {
+        a.logger.Errorw("Discord mint failed", "error", err, "collection_id", p.CollectionID)
+        if a.cognitive != nil {
+            var emsg string
+            var genErr error
+            if isInsufficientBalanceError(err) {
+                emsg, genErr = a.cognitive.GenerateMintBalanceErrorMessage(a.ctx, msg, currency)
+            } else {
+                emsg, genErr = a.cognitive.GenerateErrorMessage(a.ctx, msg, err)
+            }
+            if genErr == nil && strings.TrimSpace(emsg) != "" {
+                return a.socialClient.SendMessage(a.ctx, SocialMessage{
+                    Platform: msg.Platform,
+                    Type:     "Response",
+                    FromUser: msg.FromUser,
+                    Content:  emsg,
+                    Metadata: msg.Metadata,
+                })
+            }
+        }
+        return err
+    }
+
+    // Ask LLM for a short mint summary if available
+    var reply string
+    if a.cognitive != nil {
+        mintedCount := len(resp.Minted)
+        lastMint := ""
+        if mintedCount > 0 {
+            lastMint = resp.Minted[mintedCount-1].Mint
+        }
+        if txt, genErr := a.cognitive.GenerateMintSummary(
+            a.ctx,
+            msg,
+            p.CollectionID,
+            p.Quantity,
+            currency,
+            resp.Payer,
+            mintedCount,
+            lastMint,
+        ); genErr == nil && strings.TrimSpace(txt) != "" {
+            reply = txt
+        }
+    }
+    if strings.TrimSpace(reply) == "" {
+        reply = fmt.Sprintf("Minted %d NFT(s) from collection %s using %s.\nPayer wallet: %s", len(resp.Minted), p.CollectionID, currency, resp.Payer)
+        if len(resp.Minted) > 0 {
+            reply += "\nLast mint: " + resp.Minted[len(resp.Minted)-1].Mint
+        }
+    }
+
+    return a.socialClient.SendMessage(a.ctx, SocialMessage{
+        Platform: msg.Platform,
+        Type:     "Response",
+        FromUser: msg.FromUser,
+        Content:  reply,
+        Metadata: msg.Metadata,
+    })
+}
+
+// handleWalletAddressQuery fetches or creates the user's Discord wallet
+// and replies with the public address so they can top up SOL/CARV.
+func (a *Agent) handleWalletAddressQuery(msg *SocialMessage) error {
+    if a.deployClient == nil {
+        return fmt.Errorf("deploy client not configured")
+    }
+    addr, err := a.deployClient.GetDiscordWalletPubkey(a.ctx, msg.FromUser)
+    if err != nil {
+        a.logger.Errorw("wallet lookup failed", "error", err)
+        if a.cognitive != nil {
+            if emsg, genErr := a.cognitive.GenerateErrorMessage(a.ctx, msg, err); genErr == nil && strings.TrimSpace(emsg) != "" {
+                return a.socialClient.SendMessage(a.ctx, SocialMessage{
+                    Platform: msg.Platform,
+                    Type:     "Response",
+                    Content:  emsg,
+                    Metadata: msg.Metadata,
+                })
+            }
+        }
+        return err
+    }
+    text := fmt.Sprintf("Your minting wallet address is:\n`%s`\nYou can top up SOL or CARV there. I never show other people's addresses.", addr)
+    if a.cognitive != nil {
+        if txt, genErr := a.cognitive.GenerateWalletAddressSummary(a.ctx, msg, addr); genErr == nil && strings.TrimSpace(txt) != "" {
+            text = txt
+        }
+    }
+    // First, DM the wallet address to the user
+    dmMsg := SocialMessage{
+        Platform: msg.Platform,
+        Type:     "Response",
+        Content:  text,
+        FromUser: msg.FromUser,
+        Metadata: map[string]interface{}{"dm_user_id": msg.FromUser},
+    }
+    if err := a.socialClient.SendMessage(a.ctx, dmMsg); err != nil {
+        a.logger.Errorw("failed to DM wallet address", "error", err)
+    }
+    // Then, send a short confirmation in the original channel (no address)
+    confirm := "I’ve sent your minting wallet address to you via DM. Keep it safe and don’t share it with strangers."
+    return a.socialClient.SendMessage(a.ctx, SocialMessage{
+        Platform: msg.Platform,
+        Type:     "Response",
+        Content:  confirm,
+        FromUser: msg.FromUser,
+        Metadata: msg.Metadata,
+    })
+}
+
+// handleWalletPrivacyQuery responds when a user asks for someone else's
+// wallet address (or a generic wallet lookup) by explaining that neobot
+// only reveals the caller's own wallet.
+func (a *Agent) handleWalletPrivacyQuery(msg *SocialMessage) error {
+    // Best-effort LLM explanation
+    if a.cognitive != nil {
+        if txt, err := a.cognitive.GenerateWalletPrivacyMessage(a.ctx, msg); err == nil && strings.TrimSpace(txt) != "" {
+            return a.socialClient.SendMessage(a.ctx, SocialMessage{
+                Platform: msg.Platform,
+                Type:     "Response",
+                Content:  txt,
+                Metadata: msg.Metadata,
+            })
+        }
+    }
+    // Fallback deterministic message
+    fallback := "I can only show your own minting wallet, not other people's. Ask them directly if they want to share it."
+    return a.socialClient.SendMessage(a.ctx, SocialMessage{
+        Platform: msg.Platform,
+        Type:     "Response",
+        Content:  fallback,
+        Metadata: msg.Metadata,
+    })
+}
+
+// handleCollectionLookup answers questions like
+// "what is the collection id for XYZ NFT?" by querying the backend.
+func (a *Agent) handleCollectionLookup(msg *SocialMessage) error {
+    if a.deployClient == nil {
+        return fmt.Errorf("deploy client not configured")
+    }
+    name := extractCollectionQuery(msg.Content)
+    if name == "" {
+        return nil
+    }
+    items, err := a.deployClient.SearchCollections(a.ctx, name)
+    if err != nil {
+        a.logger.Errorw("collection search failed", "error", err, "query", name)
+        return err
+    }
+    if len(items) == 0 {
+        reply := fmt.Sprintf("I couldn't find any collection whose name looks like \"%s\".", name)
+        return a.socialClient.SendMessage(a.ctx, SocialMessage{
+            Platform: msg.Platform,
+            Type:     "Response",
+            Content:  reply,
+            Metadata: msg.Metadata,
+        })
+    }
+    var reply string
+    if a.cognitive != nil {
+        if txt, genErr := a.cognitive.GenerateCollectionLookupSummary(a.ctx, msg, name, items); genErr == nil && strings.TrimSpace(txt) != "" {
+            reply = txt
+        }
+    }
+    if strings.TrimSpace(reply) == "" {
+        if len(items) == 1 {
+            c := items[0]
+            reply = fmt.Sprintf("Collection id for **%s** (%s): `%s`", c.Name, c.Symbol, c.ID)
+        } else {
+            var b strings.Builder
+            b.WriteString(fmt.Sprintf("I found multiple collections matching \"%s\":\n", name))
+            for _, c := range items {
+                b.WriteString(fmt.Sprintf("- `%s` — %s (%s)\n", c.ID, c.Name, c.Symbol))
+            }
+            reply = b.String()
+        }
+    }
+    return a.socialClient.SendMessage(a.ctx, SocialMessage{
+        Platform: msg.Platform,
+        Type:     "Response",
+        Content:  reply,
+        Metadata: msg.Metadata,
+    })
+}
+
+// extractCollectionQuery tries to pull a clean collection name from
+// messages like "what is the collection id for FREEDOM? @neobot".
+func extractCollectionQuery(text string) string {
+    lower := strings.ToLower(text)
+    idx := strings.LastIndex(lower, "for ")
+    if idx == -1 {
+        return ""
+    }
+    q := strings.TrimSpace(text[idx+4:])
+    if q == "" {
+        return ""
+    }
+    // Strip Discord mentions like <@123>, <@!123>, <#123>
+    mentionRe := regexp.MustCompile(`<[@#]!?[0-9]+>`)
+    q = mentionRe.ReplaceAllString(q, "")
+    // Drop words that are plain @mentions (e.g., @neobot)
+    parts := strings.Fields(q)
+    kept := parts[:0]
+    for _, p := range parts {
+        if strings.HasPrefix(p, "@") {
+            break
+        }
+        kept = append(kept, p)
+    }
+    q = strings.Join(kept, " ")
+    // Trim common trailing punctuation
+    q = strings.Trim(q, " \t\n\r\"'`?!.,")
+    return strings.TrimSpace(q)
+}
+
+// isInsufficientBalanceError does a simple string match on common
+// Solana/carv insufficient-funds error messages so we can give a
+// more helpful LLM explanation.
+func isInsufficientBalanceError(err error) bool {
+    if err == nil {
+        return false
+    }
+    s := strings.ToLower(err.Error())
+    if strings.Contains(s, "insufficient funds") {
+        return true
+    }
+    if strings.Contains(s, "insufficient lamports") {
+        return true
+    }
+    if strings.Contains(s, "insufficient balance") {
+        return true
+    }
+    return false
 }
 
 func firstImageURL(metadata map[string]interface{}) string {
