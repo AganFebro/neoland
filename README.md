@@ -6,10 +6,10 @@ On top of the web UI and marketplace, this repo now ships with **neobot**, a CAR
 
 ## Docs & Guides
 - App logic
-  - `LOGIC.md` (high‑level flows and architecture)
+  - [`LOGIC.md`](https://github.com/AganFebro/neoland/blob/main/LOGIC.md) (high‑level flows and architecture)
 - neobot (Discord agent)
-  - `d.a.t.a/README.md` – what neobot is, how to configure and run it
-  - `d.a.t.a/COMMAND.md` – natural‑language commands and examples for Discord
+  - [`d.a.t.a/README.md`](https://github.com/AganFebro/neoland/blob/main/d.a.t.a/README.md) – what neobot is, how to configure and run it
+  - [`d.a.t.a/COMMAND.md`](https://github.com/AganFebro/neoland/blob/main/d.a.t.a/COMMAND.md) – natural‑language commands and examples for Discord
 
 ## Features
 - Deploy collections
