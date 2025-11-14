@@ -112,8 +112,10 @@ h1, h2, h3, .title, .subtitle, .btn, .pill, .badge, .nav-link { font-family: 'Sp
 .nav-link:hover { transform: translate(-2px, -2px); }
 .nav-link.active { outline: 3px solid var(--border); background: var(--cyan); color: #000; }
 :root[data-theme="dark"] .nav-link.active { color: #fff; }
-.nav-link-discord { background: #5865f2; color: #fff; }
-:root[data-theme="dark"] .nav-link-discord { background: #5865f2; color: #fff; }
+.nav-link-discord { background: #ff4b4b; color: #fff; }
+:root[data-theme="dark"] .nav-link-discord { background: #ff4b4b; color: #fff; }
+.nav-link-github { background: #1f6feb; color: #fff; }
+:root[data-theme="dark"] .nav-link-github { background: #1f6feb; color: #fff; }
 
 /* Simple running text ticker used on Market page */
 .ticker {
