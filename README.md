@@ -2,6 +2,15 @@
 
 A simple, full‑stack NFT app for the CARV SVM network. It lets creators deploy a collection, fans mint 1/1 NFTs, and everyone list and trade on a lightweight marketplace. The app is optimized for Backpack wallet and runs on Node.js with a small, fast front‑end.
 
+On top of the web UI and marketplace, this repo now ships with **neobot**, a CARV D.A.T.A‑powered Discord agent that can deploy collections, look up collection ids, and even mint NFTs for your community directly from Discord.
+
+## Docs & Guides
+- App logic
+  - `LOGIC.md` (high‑level flows and architecture)
+- neobot (Discord agent)
+  - `d.a.t.a/README.md` – what neobot is, how to configure and run it
+  - `d.a.t.a/COMMAND.md` – natural‑language commands and examples for Discord
+
 ## Features
 - Deploy collections
   - Upload cover image and auto‑pin to IPFS
@@ -24,9 +33,10 @@ A simple, full‑stack NFT app for the CARV SVM network. It lets creators deploy
   - Balance and approximate USD values
 - Clean UI
   - Neobrutalist theme, dark/light toggle, keyboard‑friendly
-- Discord + agents (optional)
-  - Discord bot powered by the CARV D.A.T.A framework living in `d.a.t.a/`
-  - Lets you trigger collection deployment flows directly from Discord while reusing the same on‑chain deploy API as the web app
+- D.A.T.A Framework Agents (optional, via **neobot**)
+  - `neobot` is a CARV D.A.T.A‑powered Discord agent that lives in `d.a.t.a/`
+  - Lets you deploy new collections, look up collection ids, and mint NFTs using natural‑language messages in Discord
+  - Uses the same neoland backend APIs (deploy, collection search, mint) so web and Discord stay in sync
 
 ## Repo Layout
 - `public/` – Pages and client JS (no bundler)

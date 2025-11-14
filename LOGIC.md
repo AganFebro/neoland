@@ -11,9 +11,10 @@ This document explains how the site works end‑to‑end without deep code or cr
   - Marketplace (Anchor) in `onchain/market/` for list/buy/cancel (+ SPL buy).
   - Collection program (address via `COLLECTION_PROGRAM_ID`) to register a collection PDA.
   - Offers program (optional; address via `OFFERS_PROGRAM_ID`) for collection‑wide offers.
-- Discord bot (optional):
-  - A separate service in `d.a.t.a/` runs a CARV D.A.T.A‑powered Discord bot.
-  - The bot can call this app’s deploy API so new collections can be set up from Discord, but the actual on‑chain transaction and DB records still go through the same flow as the web UI.
+- Discord agent – **neobot** (optional but first‑class):
+  - A separate Go service in `d.a.t.a/` runs `neobot`, a CARV D.A.T.A‑powered Discord agent.
+  - neobot talks in Discord like a teammate and turns natural‑language messages into calls to your neoland backend.
+  - It can deploy collections, look up collection ids by name, show the caller’s wallet, and mint NFTs (SOL or CARV) via dedicated Discord APIs.
 
 ## Pages & What They Do
 - Home: overview and quick links.
@@ -22,6 +23,91 @@ This document explains how the site works end‑to‑end without deep code or cr
 - Market: collections table + list your NFTs; manage your own listings.
 - Collection detail (`/market/<slug-or-id>`): view listings, buy, and see activity; make/cancel offers if enabled.
 - Manage: for collection owners; update price, supply, mint window, pause trading.
+
+## neobot (Discord Agent)
+
+neobot is an AI agent that lives in your Discord server and uses the same backend that powers the web app. It does not talk directly to the blockchain; instead, it calls HTTP endpoints hosted by your neoland server.
+
+- Service: Go app in `d.a.t.a/` (see `d.a.t.a/README.md`).
+- Frameworks:
+  - CARV D.A.T.A for agent orchestration and memory.
+  - An LLM provider (e.g., DeepSeek/OpenAI) for natural‑language understanding and responses.
+- Config:
+  - `.env` and `src/config/config.yaml` under `d.a.t.a/` hold LLM keys, CARV keys, Discord token, and backend URLs.
+  - `src/config/character_data_agent.json` defines tone, examples, and how to extract parameters from messages.
+
+At a high level, neobot:
+
+1) Listens to Discord DMs and mentions (e.g. `@neobot ...`).
+2) Uses the LLM + character config to decide whether the message is a wallet, deploy, lookup, or mint request.
+3) Calls the appropriate neoland backend API.
+4) Responds in Discord with a friendly summary, and sends sensitive details (like wallet addresses) via DM when needed.
+
+### Wallet Management Flow
+
+- When you ask for your wallet (e.g., “what is my wallet address?”), neobot:
+  1) Resolves or creates a wallet record for your Discord user (stored by the backend / D.A.T.A service).
+  2) Returns the address to you via **DM** only, and posts a short, non‑sensitive confirmation in the channel.
+- If you ask for another user’s wallet, neobot refuses and explains that it only reveals your own wallet for privacy reasons.
+
+### Deploy Flow (from Discord)
+
+When you ask neobot to deploy a collection with natural language:
+
+1) neobot extracts:
+   - `name` (collection name)
+   - `symbol`
+   - `mint price` (in SOL)
+   - `supply`
+   - Optional: attached image (used as collection art / metadata)
+2) It calls the same deploy API used by the web UI (configurable; typically `/api/tx/init-collection` plus a follow‑up config call on your backend).
+3) The backend performs the normal deploy steps:
+   - Pin image and metadata to IPFS.
+   - Build and submit the on‑chain tx to create the collection PDA and parent NFT.
+   - Store the collection in the DB with its PDA, mint, and settings.
+4) neobot replies in Discord with:
+   - A short summary of what was deployed.
+   - A mint link / collection link for your community.
+
+If required parameters are missing, neobot uses the LLM to ask follow‑up questions until it has enough info to safely call the API.
+
+### Collection Lookup Flow
+
+When you ask for a collection id by name:
+
+1) neobot calls a search endpoint on your backend (e.g. `/api/collections/search`) with the name string.
+2) The backend returns zero, one, or many matches.
+3) neobot responds:
+   - No matches → explains nothing was found.
+   - One match → shows the id, name, and symbol.
+   - Multiple matches → lists ids with names/symbols so you can pick the right one.
+
+This keeps Discord users in sync with collection identifiers used on the web and on‑chain.
+
+### Mint Flow (from Discord)
+
+For mint requests like “mint 2 from collection id X”:
+
+1) neobot parses:
+   - `collection id`
+   - `quantity` (default 1)
+   - `currency` (“SOL” by default, or “CARV” if requested)
+2) It ensures you have a mapped wallet (creating one if needed).
+3) neobot calls a dedicated Discord mint endpoint on your backend (e.g. `/api/discord/mint`) with:
+   - `id` – collection id
+   - `discord_user_id` – your Discord ID
+   - `quantity`
+   - `currency` – `"SOL"` or `"CARV"`
+4) The backend:
+   - Runs the normal mint logic and enforces per‑wallet limits, whitelists, and pricing.
+   - Handles SOL or CARV token settlement on‑chain.
+5) On success, neobot replies in Discord summarizing:
+   - How many NFTs were minted.
+   - Which collection id they came from.
+   - Which currency was used.
+   - The wallet that paid and the last minted mint address.
+
+If the backend reports insufficient balance, a bad collection id, or other errors, neobot converts these into friendly explanations (e.g. “your wallet doesn’t have enough SOL/CARV” or “that collection id may not exist yet”).
 
 ## Collections
 - A collection has: name, symbol, image (IPFS), price, supply, optional mint window, optional whitelist (array of allowed minter addresses), optional per‑wallet mint cap (currently fixed at 1), optional royalty percentage (basis points), owner wallet, and optional on‑chain PDA.
