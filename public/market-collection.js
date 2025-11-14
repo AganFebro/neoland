@@ -1,4 +1,4 @@
-import { fetchJSON, connectBackpack, showToast, getConfig, txExplorerUrl, waitForConfirmation, sendAndTrack, setImgSrc, showPrompt } from '/common.js';
+import { fetchJSON, connectBackpack, getBackpackProvider, showToast, getConfig, txExplorerUrl, waitForConfirmation, sendAndTrack, setImgSrc, showPrompt } from '/common.js';
 
 const CARV_MINT = 'D7WVEw9Pkf4dfCCE3fwGikRCCTvm9ipqTYPHRENLiw3s';
 let __prices = null;
@@ -108,17 +108,40 @@ async function renderCollection() {
     return;
   }
   document.getElementById('collTitle').textContent = `${info.name} (${info.symbol})`;
-  document.getElementById('collMeta').textContent = `${info.id}`;
+  // Set collection image preview (top-right) and hide placeholder after load
+  try {
+    const imgSrc = info.image || info.image_gateway;
+    const hero = document.getElementById('collHeroImg');
+    if (hero && imgSrc) setImgSrc(hero, imgSrc);
+  } catch {}
+  try {
+    const rbps = Number(info.royaltyBps || 0);
+    const pct = (rbps / 100).toFixed(2).replace(/\.00$/, '');
+    document.getElementById('collMeta').textContent = `${info.id} • Royalty: ${pct}%`;
+  } catch {
+    document.getElementById('collMeta').textContent = `${info.id}`;
+  }
 
-  const listings = await loadCollectionListings(info.id);
-  let offers = [];
-  try { const r = await fetchJSON(`/api/market/offers?collectionId=${encodeURIComponent(info.id)}`); offers = Array.isArray(r.offers) ? r.offers : []; } catch {}
-  const activity = await loadCollectionActivity(info.id);
-  // Load stats + SOL price (USD)
-  let stats = { floorLamports: null, vol24hLamports: 0, totalVolumeLamports: 0 };
-  let solUsd = null; let prices = null;
-  try { stats = await fetchJSON(`/api/market/stats?collectionId=${encodeURIComponent(info.id)}`); } catch {}
-  try { prices = await getPrices(); solUsd = typeof prices.solUsd === 'number' ? prices.solUsd : null; } catch {}
+  // Fetch everything in parallel, but render Items as soon as listings arrive
+  let listings = [];
+  const listingsP = loadCollectionListings(info.id).then((l)=>Array.isArray(l)?l:[]).catch(()=>[]);
+  const offersP = fetchJSON(`/api/market/offers?collectionId=${encodeURIComponent(info.id)}`).then(r=>Array.isArray(r.offers)?r.offers:[]).catch(()=>[]);
+  const activityP = loadCollectionActivity(info.id).catch(()=>[]);
+  const statsP = fetchJSON(`/api/market/stats?collectionId=${encodeURIComponent(info.id)}`).catch(()=>({ floorLamports: null, vol24hLamports: 0, totalVolumeLamports: 0 }));
+  const pricesP = getPrices().catch(()=>({}));
+
+  // Render items ASAP (skeleton -> quick empty state)
+  listings = await listingsP;
+  try {
+    const wrapQuick = document.getElementById('itemsWrap');
+    if (wrapQuick) {
+      wrapQuick.innerHTML = '';
+      if (!Array.isArray(listings) || listings.length === 0) {
+        wrapQuick.innerHTML = '<div class="muted">No active listings in this collection.</div>';
+      }
+    }
+  } catch {}
+  
   // Fill stats UI
   const floorEl = document.getElementById('statFloor');
   const floorUsdEl = document.getElementById('statFloorUsd');
@@ -133,7 +156,7 @@ async function renderCollection() {
   bestOfferEl.innerHTML = `<div class="label">Best Offer</div><div class="value" id="statBestOffer">—</div><div class="sub" id="statBestOfferUsd"></div>`;
   statsRow?.appendChild(bestOfferEl);
   // Stats style: USD primary, SOL + CARV as sub (match mint-collection)
-  const usdPerSol = Number(prices?.solUsd || 0) || null;
+  const prices = await pricesP; const usdPerSol = Number(prices?.solUsd || 0) || null;
   const cps = Number(prices?.carvPerSol || 0) || null;
   const setUsdPrimary = (valEl, subEl, lamports) => {
     if (!valEl) return;
@@ -147,9 +170,11 @@ async function renderCollection() {
       subEl.style.display = '';
     }
   };
+  const stats = await statsP;
   setUsdPrimary(floorEl, floorUsdEl, stats.floorLamports);
   setUsdPrimary(vol24El, vol24UsdEl, stats.vol24hLamports);
   setUsdPrimary(totalEl, totalUsdEl, stats.totalVolumeLamports);
+  const offers = await offersP;
   let best = offers.length ? offers.reduce((a, b) => (Number(a.priceLamports||0) > Number(b.priceLamports||0) ? a : b)) : null;
   const bestEl = document.getElementById('statBestOffer');
   const bestUsdEl = document.getElementById('statBestOfferUsd');
@@ -168,10 +193,10 @@ async function renderCollection() {
   const q = () => (document.getElementById('itemSearch')?.value || '').toLowerCase();
   const renderItems = () => {
     wrap.innerHTML = '';
-    listings
-      .filter(l => !q() || (l.mint || '').toLowerCase().includes(q()))
-      .forEach((l) => {
-        const el = document.createElement('div');
+    const rows = listings.filter(l => !q() || (l.mint || '').toLowerCase().includes(q()));
+    if (!rows.length) { wrap.innerHTML = '<div class="muted">No active listings in this collection.</div>'; return; }
+    rows.forEach((l) => {
+      const el = document.createElement('div');
         el.className = 'nft';
         const priceHtml = (function() {
           if (l.currencyMint && l.priceAmount != null) {
@@ -180,7 +205,8 @@ async function renderCollection() {
             return `${carv.toFixed(2)} CARV${usd}`;
           }
           const sol = Number(l.priceLamports || 0) / 1_000_000_000;
-          const usd = solUsd ? ` ($${(sol*solUsd).toFixed(2)})` : '';
+          const solUsd2 = Number(prices?.solUsd || 0) || null;
+          const usd = solUsd2 ? ` ($${(sol*solUsd2).toFixed(2)})` : '';
           return `${sol} SOL${usd}`;
         })();
         el.innerHTML = `
@@ -226,7 +252,7 @@ async function renderCollection() {
             renderItems();
             // Also pull fresh activity data
             const evs = await loadCollectionActivity(info.id);
-            activity.length = 0; Array.prototype.push.apply(activity, evs);
+            actData.length = 0; Array.prototype.push.apply(actData, evs);
             // If activity tab is visible, re-render it
             if (!document.getElementById('sectionActivity').classList.contains('hidden')) renderActivity();
             // Auto full refresh after brief countdown to get everything consistent
@@ -305,6 +331,7 @@ async function renderCollection() {
     }
   } catch {}
   const actWrap = document.getElementById('activityWrap');
+  let actData = await activityP;
   const fmtAddr = (a) => a ? `${a.slice(0,6)}...${a.slice(-6)}` : '—';
   const fmtTime = (t) => {
     const ts = Number(t || 0) * 1000; if (!ts) return '';
@@ -312,7 +339,7 @@ async function renderCollection() {
   };
   const renderActivity = () => {
     actWrap.innerHTML = '';
-    if (!activity.length) { actWrap.innerHTML = '<div class="muted">No activity yet</div>'; return; }
+    if (!actData.length) { actWrap.innerHTML = '<div class="muted">No activity yet</div>'; return; }
     const table = document.createElement('table');
     table.className = 'table';
     table.innerHTML = `
@@ -320,7 +347,7 @@ async function renderCollection() {
       <tbody></tbody>
     `;
     const tbody = table.querySelector('tbody');
-    activity.forEach((e) => {
+    actData.forEach((e) => {
       const tr = document.createElement('tr');
       if (e.type === 'mint') {
         tr.innerHTML = `<td>${fmtTime(e.ts)}</td><td><span class="pill">Mint</span></td><td>${e.mint}</td><td>—</td><td>by ${fmtAddr(e.minter)}</td>`;
@@ -357,12 +384,19 @@ async function renderCollection() {
     if (!conn) { ownedWrap.innerHTML = '<div class="muted">Connect wallet to see your items.</div>'; return; }
     try {
       const { items } = await fetchJSON(`/api/holdings?owner=${encodeURIComponent(conn.publicKey)}&id=${encodeURIComponent(info.id)}`);
-      if (!items || !items.length) { ownedWrap.innerHTML = '<div class="muted">You do not own items from this collection.</div>'; return; }
+      const ownedItems = Array.isArray(items) ? items : [];
+      const hasOwned = ownedItems.length > 0;
       const best = info.onchain_pda ? await getBestOnchainOffer(info.onchain_pda) : null;
       // no need to prefetch mint account; on-chain program validates eligibility
 
-      items.forEach(async (it) => {
-        const el = document.createElement('div'); el.className = 'nft';
+      // Section: Your NFTs (not necessarily listed)
+      if (hasOwned) {
+        const secTitle = document.createElement('div'); secTitle.className = 'subtitle'; secTitle.textContent = 'Your NFTs';
+        ownedWrap.appendChild(secTitle);
+        const gridOwned = document.createElement('div'); gridOwned.className = 'grid mt'; ownedWrap.appendChild(gridOwned);
+
+        ownedItems.forEach(async (it) => {
+          const el = document.createElement('div'); el.className = 'nft';
         el.innerHTML = `
           <img alt="NFT" loading="lazy" />
           <div class="meta"><strong>${info.name}</strong> <span>(${info.symbol})</span></div>
@@ -372,7 +406,8 @@ async function renderCollection() {
         setImgSrc(el.querySelector('img'), it.image || info.image);
         const row = el.querySelector('.row');
         // Accept button now relies on on-chain validation (Offers v2).
-        if (best && best.priceLamports > 0) {
+        // Hide/disable if the connected wallet is also the bidder (cannot accept own offer).
+        if (best && best.priceLamports > 0 && String(best.bidder) !== String(conn.publicKey)) {
           const btn = document.createElement('button'); btn.className = 'btn'; btn.textContent = `Accept ${fmtSOL4(best.priceLamports)} SOL`;
           btn.addEventListener('click', async () => {
             try {
@@ -396,13 +431,194 @@ async function renderCollection() {
           row.appendChild(btn);
         } else {
           const muted = document.createElement('div'); muted.className = 'muted';
-          muted.textContent = (!best || best.priceLamports === 0) ? 'No on-chain offers yet.' : 'Offer available.';
+          if (!best || best.priceLamports === 0) {
+            muted.textContent = 'No on-chain offers yet.';
+          } else if (String(best.bidder) === String(conn.publicKey)) {
+            muted.textContent = 'Your offer is the best. You cannot accept your own offer.';
+          } else {
+            muted.textContent = 'Offer available.';
+          }
           row.appendChild(muted);
         }
-        ownedWrap.appendChild(el);
-      });
+        // List for Sale button (moved from market page)
+        const btnList = document.createElement('button'); btnList.className = 'btn btn-ghost'; btnList.textContent = 'List for Sale';
+        btnList.addEventListener('click', async (ev) => {
+          const prices = await getPrices();
+          const usdPerSol = prices.solUsd || null;
+          const carvUsd = prices.carvUsd || null;
+          const overlay = document.createElement('div'); overlay.className = 'modal-overlay';
+          const modal = document.createElement('div'); modal.className = 'modal';
+          modal.innerHTML = `
+            <div class="title">List for Sale</div>
+            <div class="row gap" role="tablist" aria-label="Currency">
+              <button class="btn btn-ghost cur cur-sol" role="tab" aria-selected="true">SOL</button>
+              <button class="btn btn-ghost cur cur-carv" role="tab" aria-selected="false">CARV</button>
+            </div>
+            <label class="label" for="listPrice">Enter price (min 0.003 SOL or 1 CARV)</label>
+            <input id="listPrice" class="input" type="number" placeholder="0.05" value="0.05" min="0.000000001" step="0.000000001" />
+            <div class="hint small muted" style="margin-top:6px"></div>
+            <div class="error" role="alert" aria-live="polite" style="display:none"></div>
+            <div class="row gap mt right actions">
+              <button type="button" class="btn btn-ghost cancel">Cancel</button>
+              <button type="button" class="btn confirm">List NFT</button>
+            </div>
+          `;
+          overlay.appendChild(modal); document.body.appendChild(overlay);
+          const btnSol = modal.querySelector('.cur-sol');
+          const btnCarv = modal.querySelector('.cur-carv');
+          const input = modal.querySelector('#listPrice');
+          const hint = modal.querySelector('.hint');
+          const error = modal.querySelector('.error');
+          let useCarv = false;
+          const setMode = (carv) => {
+            useCarv = !!carv;
+            btnSol.setAttribute('aria-selected', String(!useCarv));
+            btnCarv.setAttribute('aria-selected', String(useCarv));
+            input.placeholder = useCarv ? '8.40' : '0.05';
+            renderHint();
+          };
+          const renderHint = () => {
+            const v = Number(String(input.value).trim());
+            error.style.display = 'none'; error.textContent = '';
+            if (!isFinite(v) || v <= 0) { hint.textContent = ''; return; }
+            if (useCarv && carvUsd && usdPerSol) {
+              const usd = v * carvUsd; const sol = usd / usdPerSol;
+              hint.textContent = `≈ ${sol.toFixed(4)} SOL • ≈ $${usd.toFixed(2)}`;
+            } else if (!useCarv && usdPerSol) {
+              const usd = v * usdPerSol; let carvTxt = '';
+              if (carvUsd) { const carv = usd / carvUsd; carvTxt = ` • ≈ ${carv.toFixed(2)} CARV`; }
+              hint.textContent = `≈ $${usd.toFixed(2)}${carvTxt}`;
+            } else {
+              hint.textContent = '';
+            }
+          };
+          btnSol.addEventListener('click', () => setMode(false));
+          btnCarv.addEventListener('click', () => setMode(true));
+          input.addEventListener('input', renderHint);
+          setMode(false);
+          const close = (result) => { overlay.classList.add('closing'); setTimeout(() => overlay.remove(), 160); return result; };
+          const awaitResult = () => new Promise((res) => {
+            modal.querySelector('.cancel').addEventListener('click', () => res(close(null)));
+            modal.querySelector('.confirm').addEventListener('click', () => {
+              const v = Number(String(input.value).trim());
+              if (!isFinite(v) || v <= 0) { error.textContent = 'Please enter a valid number.'; error.style.display = ''; return; }
+              if (!useCarv && v < 0.003) { error.textContent = 'Minimum price is 0.003 SOL.'; error.style.display = ''; return; }
+              if (useCarv && v < 1) { error.textContent = 'Minimum price is 1 CARV.'; error.style.display = ''; return; }
+              res(close({ useCarv, value: v }));
+            });
+            overlay.addEventListener('click', (e) => { if (e.target === overlay) res(close(null)); });
+            modal.addEventListener('keydown', (e) => { if (e.key === 'Escape') res(close(null)); if (e.key === 'Enter') modal.querySelector('.confirm').click(); });
+          });
+          const sel = await awaitResult();
+          if (!sel) return;
+          let currencyMint = null; let priceAmount = null; let priceSol = null;
+          if (sel.useCarv) { currencyMint = CARV_MINT; priceAmount = Math.round(sel.value * 1_000_000_000); }
+          else { priceSol = sel.value; }
+          const btn = ev.target; btn.disabled = true; btn.textContent = 'Listing...';
+          try {
+            const conn2 = await connectBackpack(); if (!conn2) throw new Error('Wallet not connected');
+            const { provider, publicKey: pk } = conn2;
+            const { Transaction, Connection } = await import('https://esm.sh/@solana/web3.js@1.98.0');
+            const body = currencyMint ? { mint: it.mint, seller: pk, currencyMint, priceAmount } : { mint: it.mint, seller: pk, priceSol };
+            const r = await fetchJSON('/api/market/tx/list', { method: 'POST', body: JSON.stringify(body) });
+            const buf = Uint8Array.from(atob(r.tx), c => c.charCodeAt(0));
+            const tx = Transaction.from(buf);
+            const signed = await provider.signTransaction(tx);
+            const { rpc } = await getConfig();
+            const connection = new Connection(rpc, 'confirmed');
+            const sig = await sendAndTrack(connection, signed.serialize(), { commitment: 'confirmed', timeoutMs: 120000 });
+            try { await waitForConfirmation(connection, sig, { timeoutMs: 90000, desired: 'confirmed' }); } catch {}
+            const idxBody = currencyMint ? { mint: it.mint, collectionId: info.id, seller: pk, currencyMint, priceAmount } : { mint: it.mint, collectionId: info.id, seller: pk, priceSol };
+            await fetchJSON('/api/market/list', { method: 'POST', body: JSON.stringify(idxBody) });
+            const t = showToast('Listing created on-chain.<br/>Refreshing in <span id="listRefresh">5</span>s…', { title: 'Listed', variant: 'success', actions: [ { label: 'View on Explorer', onClick: async () => window.open(await txExplorerUrl(sig), '_blank') } ] });
+            // Refresh items + owned tab
+            await Promise.all([
+              (async()=>{ const listings = await loadCollectionListings(info.id); const container = document.getElementById('itemsWrap'); if (container) { /* trigger re-render by resetting search */ const s = document.getElementById('itemSearch'); if (s) s.dispatchEvent(new Event('input')); } })(),
+              renderOwned()
+            ]);
+            let n = 5; const span = t?.querySelector?.('#listRefresh'); const timer = setInterval(() => { n -= 1; if (span) span.textContent = String(n); if (n <= 0) { clearInterval(timer); location.reload(); } }, 1000);
+          } catch (e) {
+            showToast((e.message || String(e)), { title: 'List failed', variant: 'error' });
+          } finally { btn.disabled = false; btn.textContent = 'List for Sale'; }
+        });
+        row.appendChild(btnList);
+          gridOwned.appendChild(el);
+        });
+      } else {
+        const msg = document.createElement('div'); msg.className = 'muted'; msg.textContent = 'You do not own items from this collection.'; ownedWrap.appendChild(msg);
+      }
+
+      // Listed NFTs moved to separate tab
+      try {} catch {}
     } catch (e) {
       ownedWrap.innerHTML = '<div class="muted">Failed to load holdings.</div>';
+    }
+  };
+
+  // Listed tab: user listings for this collection; allow cancel
+  const listedWrap = document.getElementById('listedWrap');
+  const renderListed = async () => {
+    if (!listedWrap) return;
+    listedWrap.innerHTML = '';
+    // Use existing provider if already connected; otherwise attempt silent connect
+    let provider = getBackpackProvider();
+    let pk = provider?.publicKey || null;
+    if (!pk) {
+      const conn = await connectBackpack({ silent: true });
+      provider = conn?.provider || null;
+      pk = conn?.publicKey || null;
+    }
+    if (!pk) { listedWrap.innerHTML = '<div class="muted">Connect wallet to see your listings.</div>'; return; }
+    try {
+      const qs = new URLSearchParams({ collectionId: info.id, seller: pk });
+      const { listings: myListings } = await fetchJSON(`/api/market/listings?${qs.toString()}`);
+      if (!Array.isArray(myListings) || !myListings.length) { listedWrap.innerHTML = '<div class="muted">You have no active listings in this collection.</div>'; return; }
+      for (const l of myListings) {
+        const card = document.createElement('div'); card.className = 'nft';
+        const pricesNow = await getPrices().catch(()=>({}));
+        const priceHtml = (function(){
+          if (l.currencyMint && l.priceAmount != null) {
+            const carv = Number(l.priceAmount||0)/1_000_000_000; const usd = pricesNow?.carvUsd?` ($${(carv*pricesNow.carvUsd).toFixed(2)})`:''; return `${carv.toFixed(2)} CARV${usd}`;
+          }
+          const sol = Number(l.priceLamports||0)/1_000_000_000; const usd = pricesNow?.solUsd?` ($${(sol*pricesNow.solUsd).toFixed(2)})`:''; return `${sol} SOL${usd}`;
+        })();
+        card.innerHTML = `
+          <img alt="NFT" loading="lazy" />
+          <div class="meta"><strong>${info.name}</strong> <span>(${info.symbol})</span></div>
+          <div class="meta"><strong>Mint:</strong> ${l.mint}</div>
+          <div class="meta"><strong>Price:</strong> ${priceHtml}</div>
+          <div class="row gap mt">
+            <button class="btn" data-id="${l.id}">Cancel</button>
+          </div>
+        `;
+        setImgSrc(card.querySelector('img'), info.image);
+        const cancelBtn = card.querySelector('button');
+        cancelBtn.addEventListener('click', async (ev) => {
+          const btn = ev.target;
+          if (!btn.dataset.confirmed) { btn.dataset.confirmed = '1'; const prev = btn.textContent; btn.textContent = 'Click again to Confirm'; setTimeout(()=>{ delete btn.dataset.confirmed; btn.textContent = prev; }, 2500); return; }
+          btn.disabled = true; btn.textContent = 'Cancelling...';
+          try {
+            const { Transaction, Connection } = await import('https://esm.sh/@solana/web3.js@1.98.0');
+            const r = await fetchJSON('/api/market/tx/cancel', { method: 'POST', body: JSON.stringify({ mint: l.mint, seller: pk }) });
+            const buf = Uint8Array.from(atob(r.tx), c => c.charCodeAt(0));
+            const tx = Transaction.from(buf);
+            const prov = getBackpackProvider() || provider || (await connectBackpack())?.provider;
+            const signed = await prov.signTransaction(tx);
+            const { rpc } = await getConfig();
+            const connection = new Connection(rpc, 'confirmed');
+            const sig = await sendAndTrack(connection, signed.serialize(), { commitment: 'confirmed', timeoutMs: 120000 });
+            try { await waitForConfirmation(connection, sig, { timeoutMs: 90000, desired: 'confirmed' }); } catch {}
+            await fetchJSON('/api/market/cancel', { method: 'POST', body: JSON.stringify({ listingId: l.id, seller: pk }) });
+            showToast('Listing cancelled', { title: 'Cancelled', variant: 'success' });
+            await renderListed();
+          } catch (e) {
+            showToast((e.message || String(e)), { title: 'Cancel failed', variant: 'error' });
+          } finally { btn.disabled = false; btn.textContent = 'Cancel'; }
+        });
+        listedWrap.appendChild(card);
+      }
+    } catch (e) {
+      listedWrap.innerHTML = '<div class="muted">Failed to load your listings.</div>';
     }
   };
 
@@ -416,26 +632,34 @@ async function renderCollection() {
   const tabItems = document.getElementById('tabItems');
   const tabAct = document.getElementById('tabActivity');
   const tabOwned = document.getElementById('tabOwned');
+  const tabListed = document.getElementById('tabListed');
   const secItems = document.getElementById('sectionItems');
   const secAct = document.getElementById('sectionActivity');
   const secOwned = document.getElementById('sectionOwned');
+  const secListed = document.getElementById('sectionListed');
   const setTab = (name) => {
     const itemsActive = name === 'items';
     const actActive = name === 'activity';
     const ownActive = name === 'owned';
+    const listedActive = name === 'listed';
     tabItems.setAttribute('aria-selected', String(itemsActive));
     tabAct.setAttribute('aria-selected', String(actActive));
     tabOwned.setAttribute('aria-selected', String(ownActive));
+    tabListed.setAttribute('aria-selected', String(listedActive));
     secItems.classList.toggle('hidden', !itemsActive);
     secAct.classList.toggle('hidden', !actActive);
     secOwned.classList.toggle('hidden', !ownActive);
-    if (actActive) { (async () => { activity.splice(0, activity.length, ...(await loadCollectionActivity(info.id))); renderActivity(); })(); }
+    secListed.classList.toggle('hidden', !listedActive);
+    if (actActive) { (async () => { try { actData = await loadCollectionActivity(info.id); } catch { actData = []; } renderActivity(); })(); }
     if (ownActive) renderOwned();
-    document.getElementById('itemSearch').style.display = itemsActive ? '' : 'none';
+    if (listedActive) renderListed();
+    const search = document.getElementById('itemSearch');
+    if (search) search.style.display = itemsActive ? '' : 'none';
   };
   tabItems?.addEventListener('click', () => setTab('items'));
   tabAct?.addEventListener('click', () => setTab('activity'));
   tabOwned?.addEventListener('click', () => setTab('owned'));
+  tabListed?.addEventListener('click', () => setTab('listed'));
 }
 
 window.addEventListener('DOMContentLoaded', () => {

@@ -68,6 +68,77 @@ export function setImgSrc(img, src, fallback = '/polos.jpg') {
   tryNext();
 }
 
+// Lightweight site updates renderer
+// Usage: renderUpdates('#updatesWrap', { limit: 3 })
+export async function renderUpdates(target, { limit = 3 } = {}) {
+  const el = typeof target === 'string' ? document.querySelector(target) : target;
+  if (!el) return;
+  el.innerHTML = '<div class="skeleton text"></div>';
+  try {
+    const updates = await fetch('/updates.json', { cache: 'no-cache' })
+      .then(r => r.ok ? r.json() : [])
+      .catch(() => []);
+    if (!Array.isArray(updates) || updates.length === 0) {
+      el.innerHTML = '<div class="muted">No updates yet.</div>';
+      return;
+    }
+    const list = document.createElement('div');
+    list.className = 'updates-list';
+    updates
+      .sort((a, b) => (Number(b.ts||0) - Number(a.ts||0)))
+      .slice(0, limit)
+      .forEach((u) => {
+        const row = document.createElement('div');
+        row.className = 'update-item';
+        const date = u.ts ? new Date(Number(u.ts) * 1000) : null;
+        const when = date ? date.toLocaleString() : '';
+        const title = (u.title || 'Update');
+        const body = (u.body || '');
+        const link = (u.url || null);
+        row.innerHTML = `
+          <div class="row between">
+            <strong>${title}</strong>
+            <span class="small muted">${when}</span>
+          </div>
+          <div class="small mt">${body}</div>
+          ${link ? `<div class="mt"><a class="btn btn-ghost" href="${link}" target="_blank" rel="noopener">Learn more</a></div>` : ''}
+        `;
+        list.appendChild(row);
+      });
+    el.innerHTML = '';
+    el.appendChild(list);
+  } catch (e) {
+    console.error(e);
+    el.innerHTML = '<div class="muted">Failed to load updates</div>';
+  }
+}
+
+// Collapsible helper with height animation and ARIA wiring
+// Usage: setupCollapsible({ button: '#updatesToggle', panel: '#updatesPanel', open: false, onToggle })
+export function setupCollapsible({ button, panel, open = false, onToggle } = {}) {
+  const btn = typeof button === 'string' ? document.querySelector(button) : button;
+  const el = typeof panel === 'string' ? document.querySelector(panel) : panel;
+  if (!btn || !el) return () => {};
+  let isOpen = !!open;
+  const setAria = () => {
+    btn.setAttribute('aria-expanded', String(isOpen));
+    btn.textContent = isOpen ? 'Hide' : 'Show';
+  };
+  const openAnim = () => { el.classList.add('open'); };
+  const closeAnim = () => { el.classList.remove('open'); };
+  const toggle = () => {
+    isOpen = !isOpen;
+    if (isOpen) openAnim(); else closeAnim();
+    setAria();
+    if (typeof onToggle === 'function') onToggle(isOpen);
+  };
+  // initial state
+  el.classList.remove('open');
+  setAria();
+  btn.addEventListener('click', toggle);
+  return toggle;
+}
+
 // Robust confirmation polling to avoid 30s SDK timeout
 export async function waitForConfirmation(connection, signature, { timeoutMs = 90000, desired = 'confirmed' } = {}) {
   const start = Date.now();
@@ -111,6 +182,40 @@ export async function sendAndTrack(connection, rawTx, { commitment = 'confirmed'
     // fall through; we'll still return signature
   }
   return sig;
+}
+
+// Highlight the current nav link based on location
+function setActiveNav() {
+  try {
+    const path = window.location.pathname || '/';
+    // Map path prefixes to nav hrefs
+    const routes = [
+      { prefix: '/deploy', href: '/deploy' },
+      { prefix: '/mint', href: '/mint' },
+      { prefix: '/market', href: '/market' },
+      { prefix: '/', href: '/' },
+    ];
+    let target = '/';
+    if (path !== '/') {
+      for (const r of routes) { if (r.prefix !== '/' && path.startsWith(r.prefix)) { target = r.href; break; } }
+    }
+    const links = document.querySelectorAll('.nav .nav-link');
+    links.forEach((a) => a.classList.remove('active'));
+    links.forEach((a) => {
+      try {
+        const href = a.getAttribute('href');
+        const u = new URL(href, window.location.origin);
+        if (u.pathname === target) a.classList.add('active');
+      } catch {}
+    });
+  } catch {}
+}
+if (typeof window !== 'undefined') {
+  // Run as early as possible and also on page lifecycle events
+  try { setActiveNav(); } catch {}
+  window.addEventListener('DOMContentLoaded', setActiveNav);
+  window.addEventListener('pageshow', setActiveNav);
+  window.addEventListener('popstate', setActiveNav);
 }
 
 export function getBackpackProvider() {
@@ -291,7 +396,7 @@ export async function showWalletMenu() {
   btn.addEventListener('mouseleave', scheduleCloseWalletMenu);
   menu.addEventListener('mouseenter', keepOpen);
   menu.addEventListener('mouseleave', scheduleCloseWalletMenu);
-  window.addEventListener('scroll', scheduleCloseWalletMenu, { passive: true, capture: true });
+  // Keep menu open while user scrolls; close on outside click or mouseleave
   window.addEventListener('resize', scheduleCloseWalletMenu, { passive: true });
 
   // Handlers

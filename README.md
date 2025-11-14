@@ -5,22 +5,28 @@ A simple, full‑stack NFT app for the CARV SVM network. It lets creators deploy
 ## Features
 - Deploy collections
   - Upload cover image and auto‑pin to IPFS
-  - Create an on‑chain collection PDA (proof)
-  - Store collection config (price, supply, schedule)
+  - Create an on‑chain collection PDA and parent collection NFT in one transaction
+  - Store collection config (price, supply, schedule, optional whitelist)
 - Mint NFTs
   - One‑click mint of 1/1 NFTs with on‑chain metadata
-  - SOL payments; optional CARV token support
+  - Enforced limit of 1 mint per wallet per collection
+  - SOL or CARV token payments
+  - Whitelist enforcement for restricted collections
   - Explorer links and clear confirmation UI
 - Marketplace
   - List, buy, and cancel listings
   - Set price in SOL or CARV token
-  - Optional collection‑wide offers (make/cancel)
-  - Collection stats: floor, 24h volume, activity
+  - Automatic creator royalties on secondary sales (configurable per collection)
+  - Optional collection‑wide offers (make/cancel/accept)
+  - Collection stats: floor, 24h volume, activity, best offer
 - Wallet UX
   - Backpack connect, address popover, quick copy
   - Balance and approximate USD values
 - Clean UI
   - Neobrutalist theme, dark/light toggle, keyboard‑friendly
+- Discord + agents (optional)
+  - Discord bot powered by the CARV D.A.T.A framework living in `d.a.t.a/`
+  - Lets you trigger collection deployment flows directly from Discord while reusing the same on‑chain deploy API as the web app
 
 ## Repo Layout
 - `public/` – Pages and client JS (no bundler)
@@ -59,15 +65,19 @@ A simple, full‑stack NFT app for the CARV SVM network. It lets creators deploy
   - Default is local JSON/SQLite. For Supabase:
     - `SUPABASE_URL`
     - `SUPABASE_ANON_KEY`
+- Royalties
+  - `DEFAULT_ROYALTY_BPS` – Royalty is now set per collection by the creator
 
 All variables are read by `server.js`. Missing entries will disable related features gracefully (e.g., offers).
 
 ## Common Workflows
-- Create a collection: `Deploy` page → fill name/symbol, pick image, set price, and (optionally) mint window → confirm wallet actions.
-- Mint: `Mint` page → open a collection → click `Mint` and approve the tx.
+- Create a collection: `Deploy` page → fill name/symbol, pick image, set price, royalty %, and (optionally) mint window/whitelist → confirm wallet actions.
+- Mint: `Mint` page → open a collection → select SOL/CARV, click `Mint` (batch if desired) and approve the tx (whitelist enforced if set).
 - List for sale: `Market` → `List Your NFTs` → choose NFT → set price in SOL or CARV → sign list tx → confirm index.
-- Buy: Open a collection → click `Buy` on a listing → approve and wait for confirmation.
-- Manage: `Manage` page (visible if you’re an owner) → update price, supply, mint window, or pause trading.
+- Buy: Open a collection → click `Buy` on a listing → approve and wait for confirmation (royalty automatically paid to creator).
+- Make/cancel offers: Collection page → enter offer price → sign tx to lock/unlock SOL.
+- Accept offers: As seller, accept on-chain offers to transfer NFT for locked SOL.
+- Manage: `Manage` page (visible if you’re an owner) → update price, supply, mint window, whitelist, royalty, or pause trading.
 
 ## Deployment
 - Vercel: `api/index.mjs` wraps `handleRequest` from `server.js`.
@@ -76,6 +86,7 @@ All variables are read by `server.js`. Missing entries will disable related feat
 ## Notes
 - Network calls show toasts and safe fallbacks (e.g., explorer links if confirmation is slow).
 - Minimum prices: 0.003 SOL or 1 CARV for listings; owners can pause buys for their collection.
+- Whitelists restrict minting to specified wallets; managed via `Manage` page with signed updates.
+- Royalties are automatically enforced on-chain for secondary sales; creators receive SOL or CARV directly.
 
 If you need deeper internals, see `LOGIC.md`.
-

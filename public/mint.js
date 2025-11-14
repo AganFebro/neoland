@@ -56,20 +56,42 @@ function renderMint() {
     el.className = 'nft';
     const lamports = Number(c.priceLamports || 0);
     const sol = lamports / 1_000_000_000;
-    const usdTxt = state.solUsd ? `• ≈ $${(sol * state.solUsd).toFixed(2)}` : '';
-    const carvTxt = state.carvPerSol ? `• ≈ ${(sol * state.carvPerSol).toFixed(2)} CARV` : '';
+    const usdTxt = state.solUsd ? `• $${(sol * state.solUsd).toFixed(2)}` : '';
+    const carvTxt = state.carvPerSol ? `• ${(sol * state.carvPerSol).toFixed(2)} CARV` : '';
     const priceText = lamports <= 0 ? 'Free' : `${sol} SOL ${carvTxt ? carvTxt : ''} ${usdTxt ? usdTxt : ''}`.replace(/\s+/g,' ').trim();
+    const href = `/mint/${slugify(c.name || c.symbol || c.id)}-${c.id}`;
     el.innerHTML = `
-      <a class="block" href="/mint/${slugify(c.name || c.symbol || c.id)}-${c.id}"><img alt="${c.name}" loading="lazy" /></a>
-      <div class="meta"><a href="/mint/${slugify(c.name || c.symbol || c.id)}-${c.id}"><strong>${c.name}</strong></a> <span>(${c.symbol})</span></div>
+      <div class="meta"><a href="${href}"><strong>${c.name}</strong></a> <span>(${c.symbol})</span> <span class="small muted">• ${c.id}</span></div>
+      <a class="block" href="${href}"><img alt="${c.name}" loading="lazy" /></a>
       <div class="meta">Price: ${priceText}</div>
       <div class="meta">Minted: ${c.minted_count || 0}/${c.supply || 0}</div>
       <div class="row gap mt">
-        <a class="btn" href="/mint/${slugify(c.name || c.symbol || c.id)}-${c.id}">Details</a>
+        <a class="btn" href="${href}">Details</a>
       </div>
     `;
     setImgSrc(el.querySelector('img'), c.image);
     wrap.appendChild(el);
+
+    // Async: mark whitelist-only collections
+    (async () => {
+      try {
+        const r = await fetch(`/api/whitelist?id=${encodeURIComponent(c.id)}`);
+        if (!r.ok) return;
+        const j = await r.json();
+        const addrs = Array.isArray(j.addresses) ? j.addresses : [];
+        if (addrs.length > 0) {
+          const meta = el.querySelector('.meta');
+          if (meta) {
+            const b = document.createElement('span');
+            b.className = 'mini-badge';
+            b.textContent = '🛡️ Whitelist-only';
+            b.title = 'Whitelist-only';
+            b.style.marginLeft = '8px';
+            meta.appendChild(b);
+          }
+        }
+      } catch {}
+    })();
   });
   const anchor = document.getElementById('mintCollections');
   renderPager(pager, totalPages, state.page, (p) => {
@@ -83,6 +105,10 @@ async function handleMintClientTx(ev, id) {
   const conn = await connectBackpack();
   if (!conn) return;
   const { publicKey, provider } = conn;
+  try {
+    const coll = state.collections.find((x) => x.id === id);
+    if (coll && coll.mintPaused) { showToast('Mint is currently paused', { title: 'Paused', variant: 'error' }); return; }
+  } catch {}
   const btn = ev?.target; if (btn) { btn.disabled = true; btn.textContent = 'Minting...'; }
   try {
     const { Transaction, Connection, Keypair } = await import('https://esm.sh/@solana/web3.js@1.98.0');
@@ -97,6 +123,22 @@ async function handleMintClientTx(ev, id) {
       const connection = new Connection(rpc, 'confirmed');
       sig = await sendAndTrack(connection, signed2.serialize(), { commitment: 'confirmed', timeoutMs: 120000 });
       mintAddr = r2.mint;
+      // If current wallet is collection owner, immediately update metadata (unique URI, royalty, creators)
+      try {
+        const coll = state.collections.find((x) => x.id === id);
+        if (coll && String(coll.owner) === String(publicKey)) {
+          const base = (coll?.metadata_gateway || coll?.metadata_uri || '').trim();
+          let uri = base;
+          if (base.includes('{mint}')) uri = base.replaceAll('{mint}', mintAddr);
+          else if (base.endsWith('/')) uri = base + mintAddr + '.json';
+          else if (base.startsWith('ipfs://') && !base.endsWith('.json') && !base.includes('/')) uri = base + '/' + mintAddr + '.json';
+          const upd = await fetchJSON('/api/tx/update-metadata', { method: 'POST', body: JSON.stringify({ mint: mintAddr, payer: publicKey, name: coll.name, symbol: coll.symbol, metadataUri: uri, royaltyBps: 500, creatorAddrs: [publicKey], collectionMint: coll.collection_mint || null }) });
+          const bufU = Uint8Array.from(atob(upd.tx), c => c.charCodeAt(0));
+          const txU = Transaction.from(bufU);
+          const signedU = await provider.signTransaction(txU);
+          await sendAndTrack(connection, signedU.serialize(), { commitment: 'confirmed', timeoutMs: 120000 });
+        }
+      } catch {}
     } catch (err) {
       // Fallback to legacy flow
       const mint = Keypair.generate();

@@ -60,6 +60,21 @@ class FileDB {
     const all = (((this._db.market || {}).activity) || []).filter((e) => e.collectionId === collectionId);
     return type ? all.filter((e) => e.type === type) : all;
   }
+  // Whitelist
+  async getWhitelist(id) {
+    await this._load();
+    const c = this._db[id];
+    const arr = Array.isArray(c?.whitelist) ? c.whitelist : [];
+    return Array.from(new Set(arr.map(String)));
+  }
+  async setWhitelist(id, addresses) {
+    const list = Array.from(new Set((addresses || []).filter(Boolean).map(String)));
+    await this._mutate((db) => {
+      db[id] = db[id] || {};
+      db[id].whitelist = list;
+    });
+    return true;
+  }
   // Collections
   async getCollections() {
     await this._load();
@@ -75,6 +90,16 @@ class FileDB {
         mintStartTs: c.mintStartTs != null ? Number(c.mintStartTs) : (c.mint_start_ts != null ? Number(c.mint_start_ts) : null),
         mintEndTs: c.mintEndTs != null ? Number(c.mintEndTs) : (c.mint_end_ts != null ? Number(c.mint_end_ts) : null),
         tradingPaused: !!c.trading_paused,
+        royaltyBps: c.royalty_bps != null ? Number(c.royalty_bps || 0) : 0,
+        limitOnePerWallet: !!(c.limitOnePerWallet || c.limit_one_per_wallet),
+        limitOnePerWallet: !!(c.limitOnePerWallet || c.limit_one_per_wallet),
+        mint_paused: !!c.mint_paused,
+        collection_mint: c.collection_mint || null,
+        lock_new_mints: !!c.lock_new_mints,
+        collection_cover_cid: c.collection_cover_cid || null,
+        collection_cover_gateway: c.collection_cover_gateway || null,
+        collection_meta_uri: c.collection_meta_uri || null,
+        collection_meta_gateway: c.collection_meta_gateway || null,
         image_cid: c.image_cid || null,
         image_gateway: c.image_gateway || null,
         metadata_uri: c.metadata_uri || null,
@@ -98,6 +123,13 @@ class FileDB {
       mintStartTs: c.mintStartTs != null ? Number(c.mintStartTs) : (c.mint_start_ts != null ? Number(c.mint_start_ts) : null),
       mintEndTs: c.mintEndTs != null ? Number(c.mintEndTs) : (c.mint_end_ts != null ? Number(c.mint_end_ts) : null),
       tradingPaused: !!c.trading_paused,
+      mint_paused: !!c.mint_paused,
+      collection_mint: c.collection_mint || null,
+      lock_new_mints: !!c.lock_new_mints,
+      collection_cover_cid: c.collection_cover_cid || null,
+      collection_cover_gateway: c.collection_cover_gateway || null,
+      collection_meta_uri: c.collection_meta_uri || null,
+      collection_meta_gateway: c.collection_meta_gateway || null,
       image_cid: c.image_cid || null,
       image_gateway: c.image_gateway || null,
       metadata_uri: c.metadata_uri || null,
@@ -119,10 +151,18 @@ class FileDB {
       if ('mint_end_ts' in patch) c.mint_end_ts = patch.mint_end_ts != null ? Number(patch.mint_end_ts) : null;
       if (patch.supply != null) c.supply = Number(patch.supply || 0);
       if ('trading_paused' in patch) c.trading_paused = !!patch.trading_paused;
+      if ('lock_new_mints' in patch) c.lock_new_mints = !!patch.lock_new_mints;
+      if ('mint_paused' in patch) c.mint_paused = !!patch.mint_paused;
+      if (patch.royalty_bps != null) c.royalty_bps = Number(patch.royalty_bps || 0);
+      if (patch.collection_mint != null) c.collection_mint = patch.collection_mint;
+      if (patch.collection_cover_cid != null) c.collection_cover_cid = patch.collection_cover_cid;
+      if (patch.collection_cover_gateway != null) c.collection_cover_gateway = patch.collection_cover_gateway;
+      if (patch.collection_meta_uri != null) c.collection_meta_uri = patch.collection_meta_uri;
+      if (patch.collection_meta_gateway != null) c.collection_meta_gateway = patch.collection_meta_gateway;
     });
     return true;
   }
-  async createCollection({ name, symbol, supply, priceLamports, imageCid, metadataUri, metadataGateway, owner, onchainPda = null, mintStartTs = null, mintEndTs = null }) {
+  async createCollection({ name, symbol, supply, priceLamports, imageCid, metadataUri, metadataGateway, owner, onchainPda = null, mintStartTs = null, mintEndTs = null, collectionMint = null, lockNewMints = false, collectionCoverCid = null, collectionCoverGateway = null, collectionMetaUri = null, collectionMetaGateway = null, royaltyBps = null }) {
     const id = randId();
     await this._mutate((db) => {
       db[id] = {
@@ -134,6 +174,14 @@ class FileDB {
         priceLamports: Number(priceLamports || 0),
         mintStartTs: mintStartTs != null ? Number(mintStartTs) : null,
         mintEndTs: mintEndTs != null ? Number(mintEndTs) : null,
+        mint_paused: false,
+        royalty_bps: royaltyBps != null ? Number(royaltyBps || 0) : 0,
+        collection_mint: collectionMint || null,
+        lock_new_mints: !!lockNewMints,
+        collection_cover_cid: collectionCoverCid || null,
+        collection_cover_gateway: collectionCoverGateway || null,
+        collection_meta_uri: collectionMetaUri || null,
+        collection_meta_gateway: collectionMetaGateway || null,
         image_cid: imageCid || null,
         image_gateway: imageCid ? (process.env.PINATA_GATEWAY || 'https://gateway.pinata.cloud') + '/ipfs/' + imageCid : null,
         metadata_uri: metadataUri,
@@ -151,6 +199,18 @@ class FileDB {
   async getMintsForCollection(id) {
     const c = await this.getCollectionById(id);
     return { mints: c ? (c.mints || []) : [], image_gateway: c?.image_gateway || null };
+  }
+  async hasMintFromMinter(id, minter) {
+    const c = await this.getCollectionById(id);
+    if (!c || !Array.isArray(c.mintEvents)) return false;
+    const target = String(minter);
+    return c.mintEvents.some((e) => e && String(e.minter) === target);
+  }
+  async hasMintFromMinter(id, minter) {
+    const c = await this.getCollectionById(id);
+    if (!c || !Array.isArray(c.mintEvents)) return false;
+    const target = String(minter);
+    return c.mintEvents.some((e) => e && String(e.minter) === target);
   }
   async recordMint({ id, mint, minter = null, ts = nowTs() }) {
     await this._mutate((db) => {
@@ -302,6 +362,15 @@ class SupabaseDB {
       mintStartTs: r.mint_start_ts != null ? Number(r.mint_start_ts) : null,
       mintEndTs: r.mint_end_ts != null ? Number(r.mint_end_ts) : null,
       tradingPaused: !!r.trading_paused,
+      royaltyBps: (r.royalty_bps != null ? Number(r.royalty_bps || 0) : 0),
+      limitOnePerWallet: !!r.limit_one_per_wallet,
+      mint_paused: !!r.mint_paused,
+      collection_mint: r.collection_mint || null,
+      lock_new_mints: !!r.lock_new_mints,
+      collection_cover_cid: r.collection_cover_cid || null,
+      collection_cover_gateway: r.collection_cover_gateway || null,
+      collection_meta_uri: r.collection_meta_uri || null,
+      collection_meta_gateway: r.collection_meta_gateway || null,
       image_cid: r.image_cid || null,
       image_gateway: r.image_gateway || null,
       metadata_uri: r.metadata_uri || null,
@@ -338,7 +407,8 @@ class SupabaseDB {
     coll.mints = Array.isArray(mints) ? mints.map((x) => x.mint) : [];
     return coll;
   }
-  async createCollection({ name, symbol, supply, priceLamports, imageCid, metadataUri, metadataGateway, owner, onchainPda = null, mintStartTs = null, mintEndTs = null }) {
+  async createCollection({ name, symbol, supply, priceLamports, imageCid, metadataUri, metadataGateway, owner, onchainPda = null, mintStartTs = null, mintEndTs = null, collectionMint = null, lockNewMints = false, collectionCoverCid = null, collectionCoverGateway = null, collectionMetaUri = null, collectionMetaGateway = null, royaltyBps = null }) {
+    const { limitOnePerWallet = false } = arguments[0] || {};
     const id = randId();
     const row = {
       id,
@@ -347,9 +417,18 @@ class SupabaseDB {
       symbol,
       supply: Number(supply || 0),
       price_lamports: Number(priceLamports || 0),
+      royalty_bps: royaltyBps != null ? Number(royaltyBps || 0) : 0,
       mint_start_ts: mintStartTs != null ? Number(mintStartTs) : null,
       mint_end_ts: mintEndTs != null ? Number(mintEndTs) : null,
       trading_paused: false,
+      mint_paused: false,
+      limit_one_per_wallet: !!limitOnePerWallet,
+      collection_mint: collectionMint || null,
+      lock_new_mints: !!lockNewMints,
+      collection_cover_cid: collectionCoverCid || null,
+      collection_cover_gateway: collectionCoverGateway || null,
+      collection_meta_uri: collectionMetaUri || null,
+      collection_meta_gateway: collectionMetaGateway || null,
       image_cid: imageCid || null,
       image_gateway: imageCid ? (process.env.PINATA_GATEWAY || 'https://gateway.pinata.cloud') + '/ipfs/' + imageCid : null,
       metadata_uri: metadataUri,
@@ -370,6 +449,14 @@ class SupabaseDB {
     if ('mint_end_ts' in patch) allowed.mint_end_ts = patch.mint_end_ts != null ? Number(patch.mint_end_ts) : null;
     if (patch.supply != null) allowed.supply = Number(patch.supply || 0);
     if ('trading_paused' in patch) allowed.trading_paused = !!patch.trading_paused;
+    if ('mint_paused' in patch) allowed.mint_paused = !!patch.mint_paused;
+    if ('lock_new_mints' in patch) allowed.lock_new_mints = !!patch.lock_new_mints;
+    if (patch.royalty_bps != null) allowed.royalty_bps = Number(patch.royalty_bps || 0);
+    if (patch.collection_mint != null) allowed.collection_mint = patch.collection_mint;
+    if (patch.collection_cover_cid != null) allowed.collection_cover_cid = patch.collection_cover_cid;
+    if (patch.collection_cover_gateway != null) allowed.collection_cover_gateway = patch.collection_cover_gateway;
+    if (patch.collection_meta_uri != null) allowed.collection_meta_uri = patch.collection_meta_uri;
+    if (patch.collection_meta_gateway != null) allowed.collection_meta_gateway = patch.collection_meta_gateway;
     const { error } = await this.sb.from('collections').update(allowed).eq('id', id);
     if (error) throw error;
     return true;
@@ -382,6 +469,16 @@ class SupabaseDB {
       .eq('collection_id', id);
     if (error) throw error;
     return { mints: data.map((x) => x.mint), image_gateway: coll?.image_gateway || null };
+  }
+  async hasMintFromMinter(id, minter) {
+    const { data, error } = await this.sb
+      .from('mints')
+      .select('mint')
+      .eq('collection_id', id)
+      .eq('minter', String(minter))
+      .limit(1);
+    if (error) throw error;
+    return Array.isArray(data) && data.length > 0;
   }
   async recordMint({ id, mint, minter = null, ts = nowTs() }) {
     const tx = this.sb
@@ -464,6 +561,21 @@ class SupabaseDB {
     }
     return results;
   }
+  async getWhitelist(id) {
+    const { data, error } = await this.sb.from('collections').select('*').eq('id', id).maybeSingle();
+    if (error) throw error;
+    const wl = Array.isArray(data?.whitelist) ? data.whitelist : (data?.whitelist_json ? (()=>{ try { return JSON.parse(data.whitelist_json); } catch { return []; } })() : []);
+    return Array.from(new Set((wl || []).filter(Boolean).map(String)));
+  }
+  async setWhitelist(id, addresses) {
+    const list = Array.from(new Set((addresses || []).filter(Boolean).map(String)));
+    let { error } = await this.sb.from('collections').update({ whitelist: list }).eq('id', id);
+    if (error) {
+      const r2 = await this.sb.from('collections').update({ whitelist_json: JSON.stringify(list) }).eq('id', id);
+      if (r2.error) throw r2.error;
+    }
+    return true;
+  }
 }
 
 // Simple KV-backed DB for Vercel KV / Upstash Redis REST API
@@ -504,6 +616,21 @@ class KVDB {
   }
   async _save() { await this._kvSet(this._db); }
   async init() { await this._load(); }
+  // Whitelist
+  async getWhitelist(id) {
+    await this._load();
+    const c = this._db[id];
+    const arr = Array.isArray(c?.whitelist) ? c.whitelist : [];
+    return Array.from(new Set(arr.map(String)));
+  }
+  async setWhitelist(id, addresses) {
+    const list = Array.from(new Set((addresses || []).filter(Boolean).map(String)));
+    await this._load();
+    this._db[id] = this._db[id] || {};
+    this._db[id].whitelist = list;
+    await this._save();
+    return true;
+  }
   // Collections
   async getCollections() {
     await this._load();
@@ -519,6 +646,13 @@ class KVDB {
         mintStartTs: c.mintStartTs != null ? Number(c.mintStartTs) : (c.mint_start_ts != null ? Number(c.mint_start_ts) : null),
         mintEndTs: c.mintEndTs != null ? Number(c.mintEndTs) : (c.mint_end_ts != null ? Number(c.mint_end_ts) : null),
         tradingPaused: !!c.trading_paused,
+        royaltyBps: c.royalty_bps != null ? Number(c.royalty_bps || 0) : 0,
+        collection_mint: c.collection_mint || null,
+        lock_new_mints: !!c.lock_new_mints,
+        collection_cover_cid: c.collection_cover_cid || null,
+        collection_cover_gateway: c.collection_cover_gateway || null,
+        collection_meta_uri: c.collection_meta_uri || null,
+        collection_meta_gateway: c.collection_meta_gateway || null,
         image_cid: c.image_cid || null,
         image_gateway: c.image_gateway || null,
         metadata_uri: c.metadata_uri || null,
@@ -541,6 +675,14 @@ class KVDB {
       mintStartTs: c.mintStartTs != null ? Number(c.mintStartTs) : (c.mint_start_ts != null ? Number(c.mint_start_ts) : null),
       mintEndTs: c.mintEndTs != null ? Number(c.mintEndTs) : (c.mint_end_ts != null ? Number(c.mint_end_ts) : null),
       tradingPaused: !!c.trading_paused,
+      royaltyBps: c.royalty_bps != null ? Number(c.royalty_bps || 0) : 0,
+      limitOnePerWallet: !!(c.limitOnePerWallet || c.limit_one_per_wallet),
+      collection_mint: c.collection_mint || null,
+      lock_new_mints: !!c.lock_new_mints,
+      collection_cover_cid: c.collection_cover_cid || null,
+      collection_cover_gateway: c.collection_cover_gateway || null,
+      collection_meta_uri: c.collection_meta_uri || null,
+      collection_meta_gateway: c.collection_meta_gateway || null,
       image_cid: c.image_cid || null,
       image_gateway: c.image_gateway || null,
       metadata_uri: c.metadata_uri || null,
@@ -560,10 +702,17 @@ class KVDB {
     if ('mint_end_ts' in patch) c.mint_end_ts = patch.mint_end_ts != null ? Number(patch.mint_end_ts) : null;
     if (patch.supply != null) c.supply = Number(patch.supply || 0);
     if ('trading_paused' in patch) c.trading_paused = !!patch.trading_paused;
+    if ('lock_new_mints' in patch) c.lock_new_mints = !!patch.lock_new_mints;
+    if (patch.royalty_bps != null) c.royalty_bps = Number(patch.royalty_bps || 0);
+    if (patch.collection_mint != null) c.collection_mint = patch.collection_mint;
+    if (patch.collection_cover_cid != null) c.collection_cover_cid = patch.collection_cover_cid;
+    if (patch.collection_cover_gateway != null) c.collection_cover_gateway = patch.collection_cover_gateway;
+    if (patch.collection_meta_uri != null) c.collection_meta_uri = patch.collection_meta_uri;
+    if (patch.collection_meta_gateway != null) c.collection_meta_gateway = patch.collection_meta_gateway;
     await this._save();
     return true;
   }
-  async createCollection({ name, symbol, supply, priceLamports, imageCid, metadataUri, metadataGateway, owner }) {
+  async createCollection({ name, symbol, supply, priceLamports, imageCid, metadataUri, metadataGateway, owner, onchainPda = null, mintStartTs = null, mintEndTs = null, collectionMint = null, lockNewMints = false, collectionCoverCid = null, collectionCoverGateway = null, collectionMetaUri = null, collectionMetaGateway = null, royaltyBps = null, limitOnePerWallet = false }) {
     await this._load();
     const id = randId();
     const now = nowTs();
@@ -574,10 +723,22 @@ class KVDB {
       supply: Number(supply || 0),
       price: Number(priceLamports || 0) / 1_000_000_000,
       priceLamports: Number(priceLamports || 0),
+      mint_start_ts: mintStartTs != null ? Number(mintStartTs) : null,
+      mint_end_ts: mintEndTs != null ? Number(mintEndTs) : null,
+      trading_paused: false,
+        royalty_bps: royaltyBps != null ? Number(royaltyBps || 0) : 0,
+        limitOnePerWallet: !!limitOnePerWallet,
+      collection_mint: collectionMint || null,
+      lock_new_mints: !!lockNewMints,
+      collection_cover_cid: collectionCoverCid || null,
+      collection_cover_gateway: collectionCoverGateway || null,
+      collection_meta_uri: collectionMetaUri || null,
+      collection_meta_gateway: collectionMetaGateway || null,
       image_cid: imageCid || null,
       image_gateway: imageCid ? (process.env.PINATA_GATEWAY || 'https://gateway.pinata.cloud') + '/ipfs/' + imageCid : null,
       metadata_uri: metadataUri,
       metadata_gateway: metadataGateway || null,
+      onchain_pda: onchainPda || null,
       tokenAddress: null,
       minted_count: 0,
       mints: [],
@@ -664,9 +825,11 @@ class SQLiteDB {
         symbol TEXT,
         supply INTEGER,
         price_lamports INTEGER,
+        royalty_bps INTEGER,
         mint_start_ts INTEGER,
         mint_end_ts INTEGER,
         trading_paused INTEGER,
+        limit_one_per_wallet INTEGER,
         image_cid TEXT,
         image_gateway TEXT,
         metadata_uri TEXT,
@@ -727,18 +890,29 @@ class SQLiteDB {
     `);
     // Attempt to add new columns for existing deployments
     try { this.db.exec(`ALTER TABLE collections ADD COLUMN onchain_pda TEXT`); } catch (e) { /* ignore if exists */ }
+    try { this.db.exec(`ALTER TABLE collections ADD COLUMN royalty_bps INTEGER`); } catch (e) { /* ignore if exists */ }
     try { this.db.exec(`ALTER TABLE market_listings ADD COLUMN currency_mint TEXT`); } catch (e) { /* ignore if exists */ }
     try { this.db.exec(`ALTER TABLE market_listings ADD COLUMN price_amount INTEGER`); } catch (e) { /* ignore if exists */ }
     try { this.db.exec(`ALTER TABLE collections ADD COLUMN mint_start_ts INTEGER`); } catch (e) { /* ignore if exists */ }
     try { this.db.exec(`ALTER TABLE collections ADD COLUMN mint_end_ts INTEGER`); } catch (e) { /* ignore if exists */ }
     try { this.db.exec(`ALTER TABLE collections ADD COLUMN trading_paused INTEGER`); } catch (e) { /* ignore if exists */ }
+    try { this.db.exec(`ALTER TABLE collections ADD COLUMN limit_one_per_wallet INTEGER`); } catch (e) { /* ignore if exists */ }
+    try { this.db.exec(`ALTER TABLE collections ADD COLUMN mint_paused INTEGER`); } catch (e) { /* ignore if exists */ }
+    try { this.db.exec(`ALTER TABLE collections ADD COLUMN collection_mint TEXT`); } catch (e) { /* ignore if exists */ }
+    try { this.db.exec(`ALTER TABLE collections ADD COLUMN lock_new_mints INTEGER`); } catch (e) { /* ignore if exists */ }
+    try { this.db.exec(`ALTER TABLE collections ADD COLUMN collection_cover_cid TEXT`); } catch (e) { /* ignore if exists */ }
+    try { this.db.exec(`ALTER TABLE collections ADD COLUMN collection_cover_gateway TEXT`); } catch (e) { /* ignore if exists */ }
+    try { this.db.exec(`ALTER TABLE collections ADD COLUMN collection_meta_uri TEXT`); } catch (e) { /* ignore if exists */ }
+    try { this.db.exec(`ALTER TABLE collections ADD COLUMN collection_meta_gateway TEXT`); } catch (e) { /* ignore if exists */ }
+    try { this.db.exec(`ALTER TABLE collections ADD COLUMN whitelist_json TEXT`); } catch (e) { /* ignore if exists */ }
     this.stmts = {
-      insColl: this.db.prepare(`INSERT INTO collections (id, owner, name, symbol, supply, price_lamports, mint_start_ts, mint_end_ts, image_cid, image_gateway, metadata_uri, metadata_gateway, onchain_pda, minted_count, created_at) VALUES (@id, @owner, @name, @symbol, @supply, @price_lamports, @mint_start_ts, @mint_end_ts, @image_cid, @image_gateway, @metadata_uri, @metadata_gateway, @onchain_pda, @minted_count, @created_at)`),
+      insColl: this.db.prepare(`INSERT INTO collections (id, owner, name, symbol, supply, price_lamports, royalty_bps, mint_start_ts, mint_end_ts, trading_paused, limit_one_per_wallet, mint_paused, collection_mint, lock_new_mints, collection_cover_cid, collection_cover_gateway, collection_meta_uri, collection_meta_gateway, image_cid, image_gateway, metadata_uri, metadata_gateway, onchain_pda, minted_count, created_at) VALUES (@id, @owner, @name, @symbol, @supply, @price_lamports, @royalty_bps, @mint_start_ts, @mint_end_ts, @trading_paused, @limit_one_per_wallet, @mint_paused, @collection_mint, @lock_new_mints, @collection_cover_cid, @collection_cover_gateway, @collection_meta_uri, @collection_meta_gateway, @image_cid, @image_gateway, @metadata_uri, @metadata_gateway, @onchain_pda, @minted_count, @created_at)`),
       selAllColl: this.db.prepare(`SELECT * FROM collections`),
       selColl: this.db.prepare(`SELECT * FROM collections WHERE id = ?`),
       updCollMinted: this.db.prepare(`UPDATE collections SET minted_count = minted_count + 1 WHERE id = ?`),
       insMint: this.db.prepare(`INSERT OR IGNORE INTO mints (mint, collection_id, minter, ts) VALUES (?, ?, ?, ?)`),
       selMints: this.db.prepare(`SELECT mint FROM mints WHERE collection_id = ?`),
+      selMintByMinter: this.db.prepare(`SELECT mint FROM mints WHERE collection_id = ? AND minter = ? LIMIT 1`),
       selListings: this.db.prepare(`SELECT * FROM market_listings`),
       insListing: this.db.prepare(`INSERT INTO market_listings (id, collection_id, mint, seller, price_lamports, currency_mint, price_amount, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
       selListingById: this.db.prepare(`SELECT * FROM market_listings WHERE id = ?`),
@@ -773,6 +947,7 @@ class SQLiteDB {
               symbol: v.symbol || '',
               supply: Number(v.supply || 0),
               price_lamports: Number(v.priceLamports ?? Math.round(Number(v.price || 0) * 1_000_000_000)),
+              royalty_bps: v.royalty_bps != null ? Number(v.royalty_bps || 0) : 0,
               image_cid: v.image_cid || null,
               image_gateway: v.image_gateway || null,
               metadata_uri: v.metadata_uri || null,
@@ -813,6 +988,15 @@ class SQLiteDB {
       mintStartTs: r.mint_start_ts != null ? Number(r.mint_start_ts) : null,
       mintEndTs: r.mint_end_ts != null ? Number(r.mint_end_ts) : null,
       tradingPaused: !!Number(r.trading_paused || 0),
+      royaltyBps: (r.royalty_bps != null ? Number(r.royalty_bps || 0) : 0),
+      limitOnePerWallet: !!Number(r.limit_one_per_wallet || 0),
+      mint_paused: !!Number(r.mint_paused || 0),
+      collection_mint: r.collection_mint || null,
+      lock_new_mints: !!Number(r.lock_new_mints || 0),
+      collection_cover_cid: r.collection_cover_cid || null,
+      collection_cover_gateway: r.collection_cover_gateway || null,
+      collection_meta_uri: r.collection_meta_uri || null,
+      collection_meta_gateway: r.collection_meta_gateway || null,
       image_cid: r.image_cid || null,
       image_gateway: r.image_gateway || null,
       metadata_uri: r.metadata_uri || null,
@@ -826,9 +1010,9 @@ class SQLiteDB {
     }
     return mapped;
   }
-  async createCollection({ name, symbol, supply, priceLamports, imageCid, metadataUri, metadataGateway, owner, onchainPda = null, mintStartTs = null, mintEndTs = null }) {
+  async createCollection({ name, symbol, supply, priceLamports, imageCid, metadataUri, metadataGateway, owner, onchainPda = null, mintStartTs = null, mintEndTs = null, collectionMint = null, lockNewMints = false, collectionCoverCid = null, collectionCoverGateway = null, collectionMetaUri = null, collectionMetaGateway = null, royaltyBps = null, limitOnePerWallet = false }) {
     const id = randId();
-    this.stmts.insColl.run({ id, owner, name, symbol, supply: Number(supply || 0), price_lamports: Number(priceLamports || 0), mint_start_ts: mintStartTs != null ? Number(mintStartTs) : null, mint_end_ts: mintEndTs != null ? Number(mintEndTs) : null, trading_paused: 0, image_cid: imageCid || null, image_gateway: imageCid ? (process.env.PINATA_GATEWAY || 'https://gateway.pinata.cloud') + '/ipfs/' + imageCid : null, metadata_uri: metadataUri, metadata_gateway: metadataGateway || null, onchain_pda: onchainPda || null, minted_count: 0, created_at: nowTs() });
+    this.stmts.insColl.run({ id, owner, name, symbol, supply: Number(supply || 0), price_lamports: Number(priceLamports || 0), royalty_bps: royaltyBps != null ? Number(royaltyBps || 0) : 0, mint_start_ts: mintStartTs != null ? Number(mintStartTs) : null, mint_end_ts: mintEndTs != null ? Number(mintEndTs) : null, trading_paused: 0, limit_one_per_wallet: limitOnePerWallet ? 1 : 0, mint_paused: 0, collection_mint: collectionMint || null, lock_new_mints: lockNewMints ? 1 : 0, collection_cover_cid: collectionCoverCid || null, collection_cover_gateway: collectionCoverGateway || null, collection_meta_uri: collectionMetaUri || null, collection_meta_gateway: collectionMetaGateway || null, image_cid: imageCid || null, image_gateway: imageCid ? (process.env.PINATA_GATEWAY || 'https://gateway.pinata.cloud') + '/ipfs/' + imageCid : null, metadata_uri: metadataUri, metadata_gateway: metadataGateway || null, onchain_pda: onchainPda || null, minted_count: 0, created_at: nowTs() });
     this._maybeCheckpoint();
     return id;
   }
@@ -841,6 +1025,14 @@ class SQLiteDB {
     if ('mint_end_ts' in patch) { fields.push('mint_end_ts = ?'); vals.push(patch.mint_end_ts != null ? Number(patch.mint_end_ts) : null); }
     if (patch.supply != null) { fields.push('supply = ?'); vals.push(Number(patch.supply || 0)); }
     if ('trading_paused' in patch) { fields.push('trading_paused = ?'); vals.push(patch.trading_paused ? 1 : 0); }
+    if ('mint_paused' in patch) { fields.push('mint_paused = ?'); vals.push(patch.mint_paused ? 1 : 0); }
+    if ('lock_new_mints' in patch) { fields.push('lock_new_mints = ?'); vals.push(patch.lock_new_mints ? 1 : 0); }
+    if (patch.royalty_bps != null) { fields.push('royalty_bps = ?'); vals.push(Number(patch.royalty_bps || 0)); }
+    if (patch.collection_mint != null) { fields.push('collection_mint = ?'); vals.push(patch.collection_mint); }
+    if (patch.collection_cover_cid != null) { fields.push('collection_cover_cid = ?'); vals.push(patch.collection_cover_cid); }
+    if (patch.collection_cover_gateway != null) { fields.push('collection_cover_gateway = ?'); vals.push(patch.collection_cover_gateway); }
+    if (patch.collection_meta_uri != null) { fields.push('collection_meta_uri = ?'); vals.push(patch.collection_meta_uri); }
+    if (patch.collection_meta_gateway != null) { fields.push('collection_meta_gateway = ?'); vals.push(patch.collection_meta_gateway); }
     if (fields.length === 0) return true;
     const sql = `UPDATE collections SET ${fields.join(', ')} WHERE id = ?`;
     const stmt = this.db.prepare(sql);
@@ -852,6 +1044,22 @@ class SQLiteDB {
     const coll = await this.getCollectionById(id);
     const mints = this.stmts.selMints.all(id).map((x) => x.mint);
     return { mints, image_gateway: coll?.image_gateway || null };
+  }
+  async hasMintFromMinter(id, minter) {
+    const row = this.stmts.selMintByMinter.get(id, String(minter));
+    return !!row;
+  }
+  async getWhitelist(id) {
+    const row = this.stmts.selColl.get(id);
+    if (!row) return [];
+    try { const arr = row.whitelist_json ? JSON.parse(row.whitelist_json) : []; return Array.from(new Set((arr || []).filter(Boolean).map(String))); } catch { return []; }
+  }
+  async setWhitelist(id, addresses) {
+    const list = Array.from(new Set((addresses || []).filter(Boolean).map(String)));
+    const stmt = this.db.prepare(`UPDATE collections SET whitelist_json = ? WHERE id = ?`);
+    stmt.run(JSON.stringify(list), id);
+    this._maybeCheckpoint();
+    return true;
   }
   async recordMint({ id, mint, minter = null, ts = nowTs() }) {
     const tx = this.db.transaction((id, mint, minter, ts) => {

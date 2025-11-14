@@ -384,11 +384,21 @@ export async function tryHandleMarketRoute(req, res, pathname, query) {
       const buyerAta = await getAssociatedTokenAddress(mintPk, buyerPk);
       const escrowAta = await getAssociatedTokenAddress(mintPk, listingPda, true);
 
-      // Anchor discriminator for global:buy
-      const data = createHash('sha256').update('global:buy').digest().subarray(0,8);
+      // Anchor discriminator for global:buy (+ args for v2)
+      const disc = createHash('sha256').update('global:buy').digest().subarray(0,8);
+      const isV2 = String(process.env.MARKET_PROGRAM_V2 || '1') !== '0' && String(process.env.MARKET_PROGRAM_V2 || '1').toLowerCase() !== 'false';
+      const coll = await dbh.getCollectionById(listing.collectionId).catch(()=>null);
+      const rbps = (coll && coll.royaltyBps != null) ? Number(coll.royaltyBps || 0) : 0;
+      const creatorPk = new PublicKey((coll && coll.owner) ? coll.owner : listing.seller);
+      const data = isV2 ? Buffer.concat([
+        disc,
+        (()=>{ const b = Buffer.alloc(2); b.writeUInt16LE(rbps & 0xffff, 0); return b; })(),
+        creatorPk.toBuffer(),
+      ]) : Buffer.from(disc);
       const keys = [
         { pubkey: buyerPk, isSigner: true, isWritable: true },
         { pubkey: sellerPk, isSigner: false, isWritable: true },
+        ...(isV2 ? [{ pubkey: creatorPk, isSigner: false, isWritable: true }] : []),
         { pubkey: mintPk, isSigner: false, isWritable: false },
         { pubkey: listingPda, isSigner: false, isWritable: true },
         { pubkey: escrowAta, isSigner: false, isWritable: true },
@@ -434,17 +444,28 @@ export async function tryHandleMarketRoute(req, res, pathname, query) {
       const stillAvailable = await escrowHasNft(listing.mint);
       if (!stillAvailable) return sendJson(res, 410, { error: 'listing no longer available' });
       const listingPda = PublicKey.findProgramAddressSync([Buffer.from('listing'), mintPk.toBuffer()], programId)[0];
+      // Determine compatibility/royalty settings before building accounts
+      const disc = createHash('sha256').update('global:buy_spl').digest().subarray(0,8);
+      const isV2 = String(process.env.MARKET_PROGRAM_V2 || '1') !== '0' && String(process.env.MARKET_PROGRAM_V2 || '1').toLowerCase() !== 'false';
+      const coll = await dbh.getCollectionById(listing.collectionId).catch(()=>null);
+      const rbps = (coll && coll.royaltyBps != null) ? Number(coll.royaltyBps || 0) : 0;
+      const creatorPk = new PublicKey((coll && coll.owner) ? coll.owner : listing.seller);
+      // Token addresses
       const { getAssociatedTokenAddress } = await import('@solana/spl-token');
       const buyerAta = await getAssociatedTokenAddress(mintPk, buyerPk);
       const escrowAta = await getAssociatedTokenAddress(mintPk, listingPda, true);
       const buyerPayAta = await getAssociatedTokenAddress(paymentMintPk, buyerPk);
       const sellerPayAta = await getAssociatedTokenAddress(paymentMintPk, sellerPk);
-
-      // Anchor discriminator for global:buy_spl
-      const data = createHash('sha256').update('global:buy_spl').digest().subarray(0,8);
+      const creatorPayAta = isV2 ? await getAssociatedTokenAddress(paymentMintPk, creatorPk) : null;
+      const data = isV2 ? Buffer.concat([
+        disc,
+        (()=>{ const b = Buffer.alloc(2); b.writeUInt16LE(rbps & 0xffff, 0); return b; })(),
+        creatorPk.toBuffer(),
+      ]) : Buffer.from(disc);
       const keys = [
         { pubkey: buyerPk, isSigner: true, isWritable: true },
         { pubkey: sellerPk, isSigner: false, isWritable: true },
+        ...(isV2 ? [{ pubkey: creatorPk, isSigner: false, isWritable: true }] : []),
         { pubkey: mintPk, isSigner: false, isWritable: false },
         { pubkey: listingPda, isSigner: false, isWritable: true },
         { pubkey: escrowAta, isSigner: false, isWritable: true },
@@ -452,6 +473,8 @@ export async function tryHandleMarketRoute(req, res, pathname, query) {
         { pubkey: paymentMintPk, isSigner: false, isWritable: false },
         { pubkey: buyerPayAta, isSigner: false, isWritable: true },
         { pubkey: sellerPayAta, isSigner: false, isWritable: true },
+        // Creator royalty ATA (v2 only)
+        ...(isV2 ? [{ pubkey: creatorPayAta, isSigner: false, isWritable: true }] : []),
         { pubkey: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'), isSigner: false, isWritable: false },
         { pubkey: new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL'), isSigner: false, isWritable: false },
         { pubkey: new PublicKey('11111111111111111111111111111111'), isSigner: false, isWritable: false },
@@ -463,13 +486,15 @@ export async function tryHandleMarketRoute(req, res, pathname, query) {
       tx.feePayer = buyerPk;
       // Ensure payment ATAs exist; create with deployer as payer if available
       let needsDeployerSig = false;
-      const [buyerPayInfo, sellerPayInfo] = await Promise.all([
+      const [buyerPayInfo, sellerPayInfo, creatorPayInfo] = await Promise.all([
         conn.getAccountInfo(buyerPayAta),
         conn.getAccountInfo(sellerPayAta),
+        isV2 && creatorPayAta ? conn.getAccountInfo(creatorPayAta) : Promise.resolve(null),
       ]);
       const payerForAta = deployer ? deployer.publicKey : buyerPk;
       if (!buyerPayInfo) { tx.add(createAssociatedTokenAccountInstruction(payerForAta, buyerPayAta, buyerPk, paymentMintPk)); needsDeployerSig = needsDeployerSig || !!deployer; }
       if (!sellerPayInfo) { tx.add(createAssociatedTokenAccountInstruction(payerForAta, sellerPayAta, sellerPk, paymentMintPk)); needsDeployerSig = needsDeployerSig || !!deployer; }
+      if (isV2 && !creatorPayInfo) { tx.add(createAssociatedTokenAccountInstruction(payerForAta, creatorPayAta, creatorPk, paymentMintPk)); needsDeployerSig = needsDeployerSig || !!deployer; }
       tx.add(ix);
       const { blockhash } = await conn.getLatestBlockhash('finalized');
       tx.recentBlockhash = blockhash;
@@ -560,6 +585,7 @@ export async function tryHandleMarketRoute(req, res, pathname, query) {
     return false; // not handled
   } catch (e) {
     console.error('market route error:', e);
-    return sendJson(res, 500, { error: 'market error' });
+    const msg = (e && e.message) ? String(e.message) : String(e);
+    return sendJson(res, 500, { error: 'market error', details: msg });
   }
 }

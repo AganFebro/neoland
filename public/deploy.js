@@ -11,8 +11,11 @@ window.addEventListener('DOMContentLoaded', () => {
   const drop = document.getElementById('depDrop');
   const fileName = document.getElementById('depFileName');
   const priceUsdBox = document.getElementById('depPriceUsd');
+  const royaltyInput = document.getElementById('depRoyalty');
+  // Collection cover inputs removed
   const useSchedule = document.getElementById('depUseSchedule');
   const scheduleWrap = document.getElementById('depScheduleWrap');
+  const limitOneCheckbox = document.getElementById('depLimitOne');
   const startInput = document.getElementById('depStart');
   const endInput = document.getElementById('depEnd');
   // Live USD + CARV estimate for price
@@ -43,6 +46,20 @@ window.addEventListener('DOMContentLoaded', () => {
   } catch {}
 
   // Live 1:1 preview (supports PNG transparency)
+  // Sanitize royalty input to digits and a single dot, clamp 0..25
+  function sanitizeRoyaltyInput(el) {
+    if (!el) return;
+    let v = String(el.value || '');
+    v = v.replace(/[^\d.]/g, '');
+    const parts = v.split('.');
+    if (parts.length > 2) v = parts[0] + '.' + parts.slice(1).join('');
+    let num = Number(v);
+    if (!isFinite(num)) { num = 0; }
+    if (num < 0) num = 0;
+    if (num > 25) num = 25;
+    el.value = String(num);
+  }
+  royaltyInput?.addEventListener('input', () => sanitizeRoyaltyInput(royaltyInput));
   function setName(name) { if (fileName) fileName.textContent = name || 'PNG/JPG • drag & drop supported'; }
 
   fileInput.addEventListener('change', () => {
@@ -83,6 +100,7 @@ window.addEventListener('DOMContentLoaded', () => {
       fileInput.dispatchEvent(new Event('change'));
     });
   }
+  // Collection cover UI removed
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     if (isSubmitting) return; // guard against double-submit
@@ -98,6 +116,11 @@ window.addEventListener('DOMContentLoaded', () => {
     const supply = Number(document.getElementById('depSupply').value || 0);
     const price = Number(document.getElementById('depPrice').value || 0);
     const file = fileInput.files[0];
+    sanitizeRoyaltyInput(royaltyInput);
+    const royaltyPct = Number(royaltyInput?.value || '');
+    if (!(isFinite(royaltyPct) && royaltyPct >= 0 && royaltyPct <= 25)) { showToast('Royalty must be a number between 0 and 25', { title: 'Validation', variant: 'error' }); return; }
+    const royaltyBps = Math.round(royaltyPct * 100);
+    const coverFile = null;
     // schedule validation
     let mintStartTs = null, mintEndTs = null;
     if (useSchedule?.checked) {
@@ -117,6 +140,15 @@ window.addEventListener('DOMContentLoaded', () => {
     if (supply < 10 || supply > 100000) { showToast('Supply must be between 10 and 100000', { title: 'Validation', variant: 'error' }); return; }
     if (!Number.isFinite(price) || price < 0) { showToast('Price must be a non-negative number', { title: 'Validation', variant: 'error' }); return; }
     if (!file) { showToast('Choose an image', { title: 'Validation', variant: 'error' }); return; }
+
+    // Pre-check: symbol must be unique per wallet (PDA uniqueness)
+    try {
+      const pre = await fetchJSON('/api/collections/check-symbol', { method: 'POST', body: JSON.stringify({ owner: publicKey, symbol }) });
+      if (pre?.exists) {
+        showToast(`Symbol already used for this wallet. On-chain PDA: <code>${pre.collectionPda}</code>`, { title: 'Symbol Exists', variant: 'warning', duration: 7000 });
+        return;
+      }
+    } catch {}
 
     const reader = new FileReader();
     // mark in-flight and disable UI before any async work
@@ -143,14 +175,17 @@ window.addEventListener('DOMContentLoaded', () => {
             properties: { files: [{ uri: img.gateway, type: file.type || 'image/png' }] },
           }),
         });
-        // Always: Create on-chain collection PDA proof, then register in DB (no auto mint)
+        // Collection cover removed from deploy flow
+
+        // Create on-chain collection PDA proof and parent collection NFT in one tx
         let collId = null;
         const init = await fetchJSON('/api/tx/init-collection', {
           method: 'POST',
-          body: JSON.stringify({ payer: publicKey, owner: publicKey, name, symbol, metadataUri: meta.metadataUri, price, supply }),
+          body: JSON.stringify({ payer: publicKey, owner: publicKey, name, symbol, metadataUri: meta.metadataUri, price, supply, collectionMetaUri: null }),
         });
-        const { Transaction, Connection } = await import('https://esm.sh/@solana/web3.js@1.98.0');
+        const { Transaction, Connection, PublicKey } = await import('https://esm.sh/@solana/web3.js@1.98.0');
         let initSig = null;
+        let collectionMint = init?.collectionMint || null;
         if (init?.tx) {
           const buf = Uint8Array.from(atob(init.tx), c => c.charCodeAt(0));
           const tx = Transaction.from(buf);
@@ -161,9 +196,25 @@ window.addEventListener('DOMContentLoaded', () => {
           try { await waitForConfirmation(connection, initSig, { timeoutMs: 90000, desired: 'confirmed' }); } catch {}
         }
 
+        // Ensure creator has CARV ATA to reduce size of future mint txs (enables verify in the same tx)
+        try {
+          const CARV_MINT = 'D7WVEw9Pkf4dfCCE3fwGikRCCTvm9ipqTYPHRENLiw3s';
+          const ensure = await fetchJSON('/api/tx/ensure-ata', { method: 'POST', body: JSON.stringify({ owner: publicKey, mint: CARV_MINT }) });
+          if (ensure?.tx) {
+            const buf = Uint8Array.from(atob(ensure.tx), c => c.charCodeAt(0));
+            const tx = Transaction.from(buf);
+            const signed = await provider.signTransaction(tx);
+            const { rpc } = await getConfig();
+            const connection = new Connection(rpc, 'confirmed');
+            const sig = await sendAndTrack(connection, signed.serialize(), { commitment: 'confirmed', timeoutMs: 120000 });
+            try { await waitForConfirmation(connection, sig, { timeoutMs: 60000, desired: 'confirmed' }); } catch {}
+          }
+        } catch {}
+
+        const limitOnePerWallet = !!limitOneCheckbox?.checked;
         const r = await fetchJSON('/api/deploy/config', {
           method: 'POST',
-          body: JSON.stringify({ name, symbol, supply, price, imageCid: img.imageCid, metadataUri: meta.metadataUri, metadataGateway: meta.gateway, owner: publicKey, onchainPda: init.collectionPda, mintStartTs, mintEndTs }),
+          body: JSON.stringify({ name, symbol, supply, price, imageCid: img.imageCid, metadataUri: meta.metadataUri, metadataGateway: meta.gateway, owner: publicKey, onchainPda: init.collectionPda, mintStartTs, mintEndTs, collectionMint, royaltyBps, limitOnePerWallet }),
         });
         collId = r.id;
         const short = initSig ? `${initSig.slice(0, 6)}...${initSig.slice(-6)}` : 'already initialized';

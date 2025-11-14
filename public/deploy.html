@@ -16,6 +16,10 @@
       })();
     </script>
     <link rel="stylesheet" href="/styles.css" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/favicon/apple-touch-icon.png" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon/favicon-16x16.png" />
+    <link rel="icon" href="/favicon/favicon.ico" />
   </head>
   <body class="page-deploy">
     <header class="nb-header">
@@ -26,6 +30,7 @@
           <a href="/deploy" class="nav-link">Deploy</a>
           <a href="/mint" class="nav-link">Mint</a>
           <a href="/market" class="nav-link">Market</a>
+          <a href="https://discord.gg/gFeFGf64JY" class="nav-link nav-link-discord" target="_blank" rel="noopener noreferrer">Neobot</a>
         </nav>
         <div class="row gap center">
           <span id="networkBadge" class="badge" title="Network"></span>
@@ -36,6 +41,15 @@
     </header>
 
     <main class="container">
+      <div class="ticker" aria-label="neobot announcement">
+        <div class="ticker-track">
+          <span>neobot — your AI agent to deploy NFTs from your Discord server</span>
+          <span>neobot — your AI agent to deploy NFTs from your Discord server</span>
+          <span>neobot — your AI agent to deploy NFTs from your Discord server</span>
+          <span>neobot — your AI agent to deploy NFTs from your Discord server</span>
+        </div>
+      </div>
+
       <section class="card">
         <h3 class="subtitle">Deploy New Collection</h3>
         <div class="deploy-grid">
@@ -55,6 +69,7 @@
             <label class="stack mt">
               <span class="label">Symbol</span>
               <input class="input" id="depSymbol" required />
+              <div class="small muted">Symbol must be unique per wallet. Reusing the same symbol on the same wallet will resolve to the same on-chain collection.</div>
             </label>
             <label class="stack mt">
               <span class="label">Supply (max mints)</span>
@@ -64,6 +79,17 @@
               <span class="label">Price (SOL)</span>
               <input class="input" id="depPrice" type="number" min="0" step="0.0001" value="0" />
               <div id="depPriceUsd" class="small muted" aria-live="polite"></div>
+            </label>
+
+            <label class="stack mt">
+              <span class="label">Royalty %</span>
+              <input class="input" id="depRoyalty" type="number" min="0" max="25" step="0.5" placeholder="e.g., 5" />
+              <div class="small muted">Creator will receive this percent on secondary sales. Max 25%.</div>
+            </label>
+
+            <label class="row mt center" style="gap:10px">
+              <input id="depLimitOne" type="checkbox" />
+              <span>Limit mint to 1 per wallet</span>
             </label>
 
             <label class="row mt center" style="gap:10px">
@@ -80,6 +106,7 @@
                 <input class="input" id="depEnd" type="datetime-local" />
               </label>
             </div>
+            <div class="small muted" style="margin-top:8px">After deploying, you can set Whitelist Address in <a href="/manage">Manage Collection</a>.</div>
           </form>
 
           <div>
@@ -88,9 +115,10 @@
               <img id="depPreview" alt="" loading="lazy" />
               <div id="depPlaceholder" class="placeholder">
                 Drop or choose an image
-                <div class="mini">PNG/JPG • shows here instantly</div>
+                <div class="mini">Recommended for 1:1 Aspect Ratio</div>
               </div>
             </div>
+            <div class="small muted mt">Verified (Sized) Collection will be created with a parent NFT for marketplace grouping.</div>
             <div class="deploy-actions">
               <button form="deployForm" type="submit" class="btn">Deploy Now!!!</button>
             </div>

@@ -21,20 +21,21 @@
 }
 /* Dark theme overrides */
 :root[data-theme="dark"] {
-  --bg: #0f1016;
-  --bg-2: #122026;      /* subtle teal tint for badges */
-  --fg: #f3f3f3;
-  --lime: #c9ff3f;
-  --grape: #c3a2ff;
-  --cyan: #6bdcff;
-  --orange: #ffb36a;
-  --accent: var(--cyan);
-  --accent2: #ff6db6;
-  --muted: #b7c0c6;
-  --card: #171a22;      /* dark surface */
-  --border: #000000;    /* keep neo-brutal black outlines */
+  /* Apply UI.md dark palette */
+  --bg: #000000;         /* primary background */
+  --bg-2: #1a1a1a;       /* secondary/badge surface */
+  --fg: #ffffff;         /* primary text */
+  --card: #1a1a1a;       /* card elements */
+  --lime: #ffeb3b;       /* accent 1 (primary highlight/buttons) */
+  --accent: var(--lime); /* keep accent mapped to primary */
+  --accent2: #f44336;    /* accent 2 (danger/warnings) */
+  --cyan: #2196f3;       /* accent 3 (links/alt actions) */
+  --grape: #c3a2ff;      /* optional tertiary */
+  --orange: #ffb36a;     /* optional tertiary */
+  --muted: #bdbdbd;      /* subdued text/icons (brighter for readability) */
+  --border: #000000;     /* strong neo-brutal outlines */
   --shadow: 6px 6px 0 #000000;
-  --img-solid: #1a1c26;
+  --img-solid: #111111;  /* solid fill for transparent PNGs */
 }
 * { box-sizing: border-box; }
 html, body {
@@ -56,7 +57,11 @@ html, body {
 
 /* Component-level dark surfaces to keep contrast high */
 :root[data-theme="dark"] .btn-ghost { background: var(--card); color: var(--fg); }
-:root[data-theme="dark"] .btn { color: #b9b9b9; }
+:root[data-theme="dark"] .btn { color: #000; }
+:root[data-theme="dark"] .btn.btn-accent { color: #ffffff; }
+:root[data-theme="dark"] .btn.btn-ghost { color: var(--fg); }
+/* Improve placeholder and subtle text contrast in dark mode */
+:root[data-theme="dark"] ::placeholder { color: var(--muted); opacity: 1; }
 :root[data-theme="dark"] .input,
 :root[data-theme="dark"] select { background: var(--card); color: var(--fg); }
 :root[data-theme="dark"] .file-drop { background: var(--card); }
@@ -66,6 +71,11 @@ html, body {
 :root[data-theme="dark"] .pill { background: var(--card); color: var(--fg); }
 :root[data-theme="dark"] .avatar { background: var(--card); }
 :root[data-theme="dark"] .toast .close { background: var(--card); color: var(--fg); }
+/* Improve toast readability in dark mode: use dark text on bright toasts */
+:root[data-theme="dark"] .toast .title { color: #0f0f0f; }
+:root[data-theme="dark"] .toast .msg { color: #0f0f0f; }
+/* Keep variant backgrounds but ensure strong contrast */
+:root[data-theme="dark"] .toast { border-color: var(--border); }
 
 /* Dark-mode skeleton shimmer */
 :root[data-theme="dark"] .skeleton { background: linear-gradient(90deg, #2a2e3a, #222733, #2a2e3a); }
@@ -101,6 +111,35 @@ h1, h2, h3, .title, .subtitle, .btn, .pill, .badge, .nav-link { font-family: 'Sp
 .nav-link { text-decoration: none; color: var(--fg); font-weight: 800; padding: 8px 12px; border: 3px solid var(--border); background: var(--card); box-shadow: var(--shadow); border-radius: var(--radius); }
 .nav-link:hover { transform: translate(-2px, -2px); }
 .nav-link.active { outline: 3px solid var(--border); background: var(--cyan); color: #000; }
+:root[data-theme="dark"] .nav-link.active { color: #fff; }
+.nav-link-discord { background: #5865f2; color: #fff; }
+:root[data-theme="dark"] .nav-link-discord { background: #5865f2; color: #fff; }
+
+/* Simple running text ticker used on Market page */
+.ticker {
+  margin-top: 8px;
+  border: 3px solid var(--border);
+  background: #000;
+  color: #fff;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  padding: 6px 0;
+  font-size: 13px;
+  font-weight: 800;
+}
+.ticker-track {
+  display: flex;
+  gap: 20px;
+  white-space: nowrap;
+  animation: ticker-scroll 20s linear infinite;
+  width: max-content;
+}
+.ticker span { letter-spacing: 0.03em; }
+@keyframes ticker-scroll {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
 
 .badge { display: inline-block; font-size: 12px; padding: 6px 10px; border: 3px solid var(--border); background: var(--bg-2); box-shadow: var(--shadow); border-radius: 999px; }
 
@@ -141,6 +180,21 @@ a.btn, a.btn:link, a.btn:visited, a.btn:hover, a.btn:active { color: inherit; te
     radial-gradient(ellipse at 30% 20%, var(--bg-2), transparent 60%);
 }
 .nft .meta { font-size: 12px; word-break: break-all; margin-top: 8px; }
+/* Market card spacing when title sits above image */
+.page-market .nft .meta:first-of-type { margin-top: 0; margin-bottom: 8px; }
+.page-market .nft img { margin-top: 6px; margin-bottom: 10px; }
+/* Emphasize name, de-emphasize symbol + id on market cards */
+.page-market .nft .meta:first-of-type strong { font-size: 16px; }
+.page-market .nft .meta:first-of-type span { font-size: 12px; color: var(--muted); font-weight: 700; }
+
+/* Mint cards: same header layout as market */
+.page-mint .nft .meta:first-of-type { margin-top: 0; margin-bottom: 8px; }
+.page-mint .nft img { margin-top: 6px; margin-bottom: 10px; }
+.page-mint .nft .meta:first-of-type strong { font-size: 16px; }
+.page-mint .nft .meta:first-of-type span { font-size: 12px; color: var(--muted); font-weight: 700; }
+/* Remove default link styling for names inside cards */
+.page-mint .nft .meta a { color: inherit; text-decoration: none; }
+.page-market .nft .meta a { color: inherit; text-decoration: none; }
 .hero { width: 280px; height: 180px; object-fit: cover; border: 3px solid #000; box-shadow: var(--shadow); border-radius: var(--radius); }
 
 footer { padding-bottom: 30px; }
@@ -166,6 +220,8 @@ footer { padding-bottom: 30px; }
 
 /* Deploy two-column layout + square preview */
 .deploy-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; align-items: start; }
+.page-deploy #depPriceUsd { margin-top: 6px; line-height: 1.2; }
+.page-deploy #depPriceUsd + label { margin-top: 8px !important; }
 .square-frame { position: relative; width: 100%; aspect-ratio: 1 / 1; border: 3px solid var(--border); border-radius: var(--radius);
   background:
     linear-gradient(45deg, var(--bg) 25%, transparent 25%) 0 0/24px 24px,
@@ -206,9 +262,16 @@ footer { padding-bottom: 30px; }
 .toolbar { display: flex; gap: 12px; align-items: center; justify-content: space-between; margin-top: 8px; margin-bottom: 8px; }
 .toolbar .subtitle { margin: 0; }
 /* Market collection layout tune */
-.page-market-coll .toolbar { align-items: flex-end; flex-wrap: wrap; gap: 16px; }
+.page-market-coll .toolbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .page-market-coll #statsRow { margin-top: 8px; }
 .page-market-coll #itemsWrap { margin-top: 12px; }
+.page-market-coll #collPreviewBox { align-self: flex-start; }
+.page-market-coll #collPreviewBox img { width: 100%; height: 100%; object-fit: contain; }
+.page-market-coll .coll-hero { position: absolute; top: 22px; right: 22px; width: 290px; height: 290px; border: 3px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); background: var(--img-solid); overflow: hidden; }
+.page-market-coll .coll-hero img { width: 100%; height: 100%; object-fit: cover; display: block; }
+@media (max-width: 1150px) { .page-market-coll .coll-hero { width: 250px; height: 250px; } }
+@media (max-width: 850px) { .page-market-coll .coll-hero { display: none; } }
+.page-market-coll #collPreviewBox { position: static; top: auto; }
 /* Mint collection toolbar alignment (title + stats left, button top-right) */
 .page-mint-coll .toolbar { align-items: flex-start; gap: 16px; }
 .page-mint-coll .toolbar > .stack { flex: 1 1 auto; min-width: 0; }
@@ -235,7 +298,7 @@ footer { padding-bottom: 30px; }
 .popover .actions { display: flex; gap: 8px; margin-top: 10px; justify-content: flex-end; }
 
 /* Wallet hover menu */
-.wallet-menu { position: absolute; top: 64px; right: 16px; width: 320px; max-width: calc(100vw - 32px); border: 3px solid var(--border); background: var(--card); box-shadow: var(--shadow); border-radius: var(--radius); z-index: 10002; transform: translateX(16px); opacity: 0; pointer-events: none; }
+.wallet-menu { position: fixed; top: 64px; right: 16px; width: 320px; max-width: calc(100vw - 32px); border: 3px solid var(--border); background: var(--card); box-shadow: var(--shadow); border-radius: var(--radius); z-index: 10002; transform: translateX(16px); opacity: 0; pointer-events: none; }
 .wallet-menu.open { animation: slide-in-right 160ms ease-out forwards; pointer-events: auto; }
 .wallet-menu.closing { animation: slide-out-right 140ms ease-in forwards; }
 .wallet-menu .wm-header { padding: 12px; border-bottom: 3px solid var(--border); display: flex; align-items: center; gap: 10px; }
@@ -307,3 +370,14 @@ footer { padding-bottom: 30px; }
 .page-market .nft img,
 .page-market-coll .nft img,
 .page-collection .nft img { background: var(--img-solid) !important; }
+
+/* Updates widget */
+.updates-list { display: grid; gap: 10px; }
+.update-item { border: 3px solid var(--border); background: var(--card); padding: 10px 12px; box-shadow: var(--shadow); border-radius: var(--radius); }
+
+/* Collapsible panel (animated height) */
+.collapsible { overflow: hidden; max-height: 0; transition: max-height .22s ease; }
+.collapsible.open { max-height: 1200px; }
+
+/* Small button variant for headers */
+.btn.btn-small { padding: 6px 10px; font-size: 12px; line-height: 1; }

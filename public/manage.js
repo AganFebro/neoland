@@ -53,6 +53,11 @@ function renderCard(coll, owner) {
         <input class="input" type="number" step="0.0001" min="0" id="price_${coll.id}" value="${(Number(coll.priceLamports||0)/1_000_000_000).toString()}"/>
       </label>
       <label class="stack">
+        <span class="label">Royalty %</span>
+        <input class="input" type="number" step="0.5" min="0" max="25" id="royalty_${coll.id}" value="${(Number(coll.royaltyBps||0)/100).toString()}"/>
+        <div class="hint">Creator receives this percent on secondary sales. Max 25%.</div>
+      </label>
+      <label class="stack">
         <span class="label">Supply</span>
         <input class="input" type="number" min="${minSupply}" max="${maxSupply}" id="supply_${coll.id}" value="${Number(coll.supply || 0)}"/>
         <div class="hint">Min 10, Max 100,000. Cannot be lower than minted (${Number(coll.minted_count||0)}).</div>
@@ -75,6 +80,23 @@ function renderCard(coll, owner) {
         <input type="checkbox" id="pause_${coll.id}" ${coll.tradingPaused ? 'checked' : ''} />
         <span>Pause buying (listings remain allowed)</span>
       </label>
+      <label class="row center" style="gap:10px; margin-top:8px">
+        <input type="checkbox" id="mintpause_${coll.id}" ${coll.mintPaused ? 'checked' : ''} />
+        <span>Pause minting</span>
+      </label>
+      ${!coll.collectionMint ? `<div class="row mt" style="gap:10px">
+        <button class="btn" id="enable_${coll.id}">Enable Verified Collection</button>
+      </div>` : ''}
+      <div class="stack mt">
+        <span class="label">Whitelist (one address per line)</span>
+        <textarea class="input" id="wl_${coll.id}" rows="6" placeholder="Base58 wallet addresses..."></textarea>
+        <div class="row center" style="gap:10px">
+          <button class="btn" id="wl_load_${coll.id}">Load Whitelist</button>
+          <button class="btn" id="wl_save_${coll.id}">Save Whitelist</button>
+          <span class="small muted" id="wl_status_${coll.id}">—</span>
+        </div>
+        <div class="hint">Only addresses listed can mint. Leave empty to allow anyone.</div>
+      </div>
     </div>
     <div class="manage-actions">
       <button class="btn" id="save_${coll.id}" disabled>Save Changes</button>
@@ -83,6 +105,81 @@ function renderCard(coll, owner) {
 
   const img = form.querySelector(`#img_${coll.id}`);
   setImgSrc(img, coll.image || coll.image_gateway);
+
+  // Enable Verified Collection button
+  const enableBtn = form.querySelector(`#enable_${coll.id}`);
+  if (enableBtn && !coll.collectionMint) {
+    enableBtn.addEventListener('click', async () => {
+      try {
+        enableBtn.disabled = true;
+        enableBtn.textContent = 'Preparing…';
+        const provider = getBackpackProvider();
+        if (!provider) { showToast('Connect Backpack first', { title: 'Wallet', variant: 'error' }); enableBtn.disabled = false; enableBtn.textContent = 'Enable Verified Collection'; return; }
+        // Pin minimal parent metadata; fallback to existing metadata if pinning not configured
+        let collectionMetaGateway = null;
+        try {
+          const meta = {
+            name: `${coll.name} Collection`,
+            symbol: `${coll.symbol}`,
+            description: `${coll.name} (Collection)`,
+            image: coll.image || coll.image_gateway || '',
+            attributes: [],
+            properties: { files: [{ uri: coll.image || coll.image_gateway || '', type: 'image/png' }] },
+          };
+          const r = await fetchJSON('/api/pin/metadata', { method: 'POST', body: JSON.stringify(meta) });
+          collectionMetaGateway = r.gateway || null;
+        } catch {}
+        const useMeta = collectionMetaGateway || coll.metadata_gateway || coll.metadata_uri;
+        if (!useMeta) { showToast('No metadata available for parent NFT. Please set a collection image/metadata.', { title: 'Missing metadata', variant: 'error' }); enableBtn.disabled = false; enableBtn.textContent = 'Enable Verified Collection'; return; }
+        // Build parent NFT tx
+        enableBtn.textContent = 'Building Tx…';
+        const build = await fetchJSON('/api/tx/create-collection-nft', { method: 'POST', body: JSON.stringify({ owner, name: `${coll.name} Collection`, symbol: `${coll.symbol}`, metadataUri: useMeta }) });
+        const { Transaction, Connection } = await import('https://esm.sh/@solana/web3.js@1.98.0');
+        const buf = Uint8Array.from(atob(build.tx), c => c.charCodeAt(0));
+        const tx = Transaction.from(buf);
+        const signed = await provider.signTransaction(tx);
+        const { rpc } = await getConfig();
+        const connection = new Connection(rpc, 'confirmed');
+        enableBtn.textContent = 'Sending…';
+        let sig;
+        try {
+          sig = await connection.sendRawTransaction(signed.serialize(), { maxRetries: 20, preflightCommitment: 'confirmed' });
+        } catch (e) {
+          let extra = '';
+          try {
+            if (e && typeof e.getLogs === 'function') {
+              const logs = await e.getLogs();
+              if (logs && logs.length) extra = `\nLogs:\n${logs.join('\n')}`;
+            } else if (e && e.logs && Array.isArray(e.logs)) {
+              extra = `\nLogs:\n${e.logs.join('\n')}`;
+            }
+          } catch {}
+          throw new Error(`${e?.message || String(e)}${extra}`);
+        }
+        try { await connection.confirmTransaction(sig, 'confirmed'); } catch {}
+        // Save collectionMint via signed admin update
+        const { nonce } = await fetchJSON(`/api/admin/nonce?addr=${encodeURIComponent(owner)}`);
+        const patch = { collectionMint: build.mint };
+        if (collectionMetaGateway) patch.collectionMetaGateway = collectionMetaGateway;
+        const canonOrder = ['priceSol','price_lamports','mintStartTs','mintEndTs','supply','tradingPaused','mintPaused','collectionMint','collectionCoverCid','collectionCoverGateway','collectionMetaUri','collectionMetaGateway'];
+        const canon = {}; canonOrder.forEach((k)=>{ if (k in patch) canon[k] = patch[k]; });
+        const msg = `neoland admin\naddr:${owner}\nnonce:${nonce}\naction:update-collection\nid:${coll.id}\npatch:${JSON.stringify(canon)}`;
+        const enc = new TextEncoder();
+        const sigRes = await provider.signMessage(enc.encode(msg));
+        const sigRaw = sigRes?.signature ?? sigRes;
+        const bs58mod = (await import('https://esm.sh/bs58@6.0.0')).default;
+        const sigB58 = typeof sigRaw === 'string' ? sigRaw : bs58mod.encode(new Uint8Array(sigRaw));
+        const r = await fetchJSON('/api/admin/update-collection', { method: 'POST', body: JSON.stringify({ id: coll.id, addr: owner, nonce, signature: sigB58, patch }) });
+        Object.assign(coll, r.collection || {});
+        showToast('Verified collection enabled. You can mint again now.', { title: 'Success', variant: 'success' });
+        enableBtn.remove();
+      } catch (e) {
+        console.error(e);
+        showToast(e?.message || String(e), { title: 'Enable failed', variant: 'error' });
+        enableBtn.disabled = false; enableBtn.textContent = 'Enable Verified Collection';
+      }
+    });
+  }
 
   const onSave = async () => {
     const priceInput = form.querySelector(`#price_${coll.id}`);
@@ -99,6 +196,19 @@ function renderCard(coll, owner) {
     const startTs = sStr ? fromLocal(sStr) : null;
     const endTs = eStr ? fromLocal(eStr) : null;
     const tradingPaused = form.querySelector(`#pause_${coll.id}`).checked;
+    const mintPaused = form.querySelector(`#mintpause_${coll.id}`).checked;
+
+    const royaltyInput = form.querySelector(`#royalty_${coll.id}`);
+    // sanitize royalty input
+    let royaltyStr = String(royaltyInput?.value || '');
+    royaltyStr = royaltyStr.replace(/[^\d.]/g, '');
+    const parts = royaltyStr.split('.');
+    if (parts.length > 2) royaltyStr = parts[0] + '.' + parts.slice(1).join('');
+    let royaltyPct = Number(royaltyStr);
+    if (!isFinite(royaltyPct) || royaltyPct < 0) royaltyPct = 0;
+    if (royaltyPct > 25) royaltyPct = 25;
+    royaltyInput.value = String(royaltyPct);
+    const royaltyBps = Math.round(royaltyPct * 100);
 
     const patch = {};
     if (Math.round(priceSol * 10_000) !== Math.round((Number(coll.priceLamports||0)/1_000_000_000) * 10_000)) patch.priceSol = priceSol;
@@ -111,7 +221,8 @@ function renderCard(coll, owner) {
     if (!startedNow && startTs !== curStart) patch.mintStartTs = startTs;
     if (endTs !== curEnd) patch.mintEndTs = endTs;
     if (Boolean(tradingPaused) !== Boolean(coll.tradingPaused)) patch.tradingPaused = tradingPaused;
-
+    if (royaltyBps !== Number(coll.royaltyBps || 0)) patch.royaltyBps = royaltyBps;
+    if (Boolean(mintPaused) !== Boolean(coll.mintPaused)) patch.mintPaused = mintPaused;
     const keys = Object.keys(patch);
     if (!keys.length) { showToast('No changes to save.', { title: 'Nothing Changed', variant: 'info' }); return; }
 
@@ -126,7 +237,8 @@ function renderCard(coll, owner) {
       const { nonce } = await fetchJSON(`/api/admin/nonce?addr=${encodeURIComponent(owner)}`);
       const canon = {};
       // Keep deterministic order similar to server allowedKeys
-      ['priceSol','price_lamports','mintStartTs','mintEndTs','supply','tradingPaused'].forEach((k) => { if (k in patch) canon[k] = patch[k]; });
+      ['priceSol','price_lamports','mintStartTs','mintEndTs','supply','tradingPaused','mintPaused','lockNewMints','royaltyBps','collectionMint','collectionCoverCid','collectionCoverGateway','collectionMetaUri','collectionMetaGateway']
+        .forEach((k) => { if (k in patch) canon[k] = patch[k]; });
       const msg = `neoland admin\naddr:${owner}\nnonce:${nonce}\naction:update-collection\nid:${coll.id}\npatch:${JSON.stringify(canon)}`;
       const enc = new TextEncoder();
       const sigRes = await provider.signMessage(enc.encode(msg));
@@ -157,6 +269,10 @@ function renderCard(coll, owner) {
       if (en) en.value = toIsoLocal(coll.mintEndTs);
       const pause = form.querySelector(`#pause_${coll.id}`);
       if (pause) pause.checked = !!coll.tradingPaused;
+      const mintPauseBox = form.querySelector(`#mintpause_${coll.id}`);
+      if (mintPauseBox) mintPauseBox.checked = !!coll.mintPaused;
+      const royaltyBox = form.querySelector(`#royalty_${coll.id}`);
+      if (royaltyBox) royaltyBox.value = (Number(coll.royaltyBps || 0) / 100).toString();
       recomputeDirty();
       showToast('Your changes have been saved.', { title: 'Saved', variant: 'success' });
     } catch (e) {
@@ -174,14 +290,27 @@ function renderCard(coll, owner) {
   const recomputeDirty = () => {
     const priceInput = form.querySelector(`#price_${coll.id}`);
     const priceSol = Number(priceInput.value || 0);
+    const royaltyInput = form.querySelector(`#royalty_${coll.id}`);
+    // sanitize on-the-fly
+    let royaltyStr = String(royaltyInput?.value || '');
+    royaltyStr = royaltyStr.replace(/[^\d.]/g, '');
+    const parts = royaltyStr.split('.');
+    if (parts.length > 2) royaltyStr = parts[0] + '.' + parts.slice(1).join('');
+    let royaltyPct = Number(royaltyStr);
+    if (!isFinite(royaltyPct) || royaltyPct < 0) royaltyPct = 0;
+    if (royaltyPct > 25) royaltyPct = 25;
+    royaltyInput.value = String(royaltyPct);
+    const royaltyBps = Math.round(royaltyPct * 100);
     let valid = true;
     if (!Number.isFinite(priceSol) || priceSol < 0) { valid = false; }
+    if (!(Number.isFinite(royaltyBps) && royaltyBps >= 0 && royaltyBps <= 2500)) { valid = false; }
     const supplyRaw = Number(form.querySelector(`#supply_${coll.id}`).value || 0);
     const sStr = form.querySelector(`#start_${coll.id}`).value;
     const eStr = form.querySelector(`#end_${coll.id}`).value;
     const startTs = sStr ? fromLocal(sStr) : null;
     const endTs = eStr ? fromLocal(eStr) : null;
     const tradingPaused = form.querySelector(`#pause_${coll.id}`).checked;
+    const mintPaused = form.querySelector(`#mintpause_${coll.id}`).checked;
     const startedNow = coll.mintStartTs != null ? (Math.floor(Date.now()/1000) >= Number(coll.mintStartTs)) : false;
     const patch = {};
     if (Math.round(priceSol * 10_000) !== Math.round((Number(coll.priceLamports||0)/1_000_000_000) * 10_000)) patch.priceSol = priceSol;
@@ -192,11 +321,56 @@ function renderCard(coll, owner) {
     if (!startedNow && startTs !== curStart) patch.mintStartTs = startTs;
     if (endTs !== curEnd) patch.mintEndTs = endTs;
     if (Boolean(tradingPaused) !== Boolean(coll.tradingPaused)) patch.tradingPaused = tradingPaused;
+    if (Boolean(mintPaused) !== Boolean(coll.mintPaused)) patch.mintPaused = mintPaused;
+    if (royaltyBps != null && royaltyBps !== Number(coll.royaltyBps || 0)) patch.royaltyBps = royaltyBps;
     const dirty = Object.keys(patch).length > 0;
     saveBtn.disabled = !(dirty && valid);
   };
   form.querySelectorAll('input').forEach((i) => i.addEventListener('input', recomputeDirty));
   recomputeDirty();
+
+  // Whitelist handlers
+  const wlArea = form.querySelector(`#wl_${coll.id}`);
+  const wlStatus = form.querySelector(`#wl_status_${coll.id}`);
+  const renderWlStatus = (list) => { if (wlStatus) wlStatus.textContent = `${list.length} address(es)`; };
+  const parseWl = async () => {
+    const raw = (wlArea?.value || '').split(/\s|,|;|\n|\r|\t/).map(s => s.trim()).filter(Boolean);
+    const uniq = Array.from(new Set(raw));
+    const bs58 = (await import('https://esm.sh/bs58@6.0.0')).default;
+    const valid = uniq.filter((a) => { try { return bs58.decode(a).length === 32; } catch { return false; } });
+    renderWlStatus(valid);
+    return valid;
+  };
+  const loadWhitelist = async () => {
+    try {
+      const j = await fetchJSON(`/api/whitelist?id=${encodeURIComponent(coll.id)}`);
+      const arr = Array.isArray(j.addresses) ? j.addresses : [];
+      if (wlArea) wlArea.value = arr.join('\n');
+      renderWlStatus(arr);
+    } catch { if (wlArea) wlArea.value = ''; if (wlStatus) wlStatus.textContent = '—'; }
+  };
+  form.querySelector(`#wl_load_${coll.id}`)?.addEventListener('click', (e) => { e.preventDefault(); loadWhitelist().catch(console.error); });
+  form.querySelector(`#wl_save_${coll.id}`)?.addEventListener('click', async (e) => {
+    e.preventDefault();
+    try {
+      const list = await parseWl();
+      const provider = getBackpackProvider();
+      if (!provider?.signMessage) { showToast('Backpack signMessage not available', { title: 'Wallet Error', variant: 'error' }); return; }
+      const { nonce } = await fetchJSON(`/api/admin/nonce?addr=${encodeURIComponent(owner)}`);
+      const msg = `neoland admin\naddr:${owner}\nnonce:${nonce}\naction:update-whitelist\nid:${coll.id}\naddresses:${JSON.stringify(list)}`;
+      const enc = new TextEncoder();
+      const sigRes = await provider.signMessage(enc.encode(msg));
+      const sigRaw = (sigRes && sigRes.signature) ? sigRes.signature : sigRes;
+      const bs58 = (await import('https://esm.sh/bs58@6.0.0')).default;
+      const sigB58 = typeof sigRaw === 'string' ? sigRaw : bs58.encode(new Uint8Array(sigRaw));
+      await fetchJSON('/api/admin/whitelist', { method: 'POST', body: JSON.stringify({ id: coll.id, addr: owner, nonce, signature: sigB58, addresses: list }) });
+      showToast('Whitelist saved', { title: 'Saved', variant: 'success' });
+    } catch (e) {
+      showToast(e?.message || String(e), { title: 'Save failed', variant: 'error' });
+    }
+  });
+  // Auto load whitelist on render
+  loadWhitelist().catch(console.error);
   return form;
 }
 

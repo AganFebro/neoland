@@ -16,6 +16,10 @@
       })();
     </script>
     <link rel="stylesheet" href="/styles.css" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/favicon/apple-touch-icon.png" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon/favicon-16x16.png" />
+    <link rel="icon" href="/favicon/favicon.ico" />
     <style>
 @import url('https://fonts.googleapis.com/css2?family=Old+Standard+TT:ital,wght@0,400;0,700;1,400&display=swap');
 </style>
@@ -29,6 +33,7 @@
           <a href="/deploy" class="nav-link">Deploy</a>
           <a href="/mint" class="nav-link">Mint</a>
           <a href="/market" class="nav-link">Market</a>
+          <a href="https://discord.gg/gFeFGf64JY" class="nav-link nav-link-discord" target="_blank" rel="noopener noreferrer">Neobot</a>
         </nav>
         <div class="row gap center">
           <span id="networkBadge" class="badge" title="Network"></span>
@@ -39,6 +44,15 @@
     </header>
 
     <main class="container">
+      <div class="ticker" aria-label="neobot announcement">
+        <div class="ticker-track">
+          <span>neobot — your AI agent to deploy NFTs from your Discord server</span>
+          <span>neobot — your AI agent to deploy NFTs from your Discord server</span>
+          <span>neobot — your AI agent to deploy NFTs from your Discord server</span>
+          <span>neobot — your AI agent to deploy NFTs from your Discord server</span>
+        </div>
+      </div>
+
       <section class="card">
         <span class="badge-sticker">NEW</span>
         <div class="row between center">
@@ -55,6 +69,16 @@
             <div class="shape squiggle" style="position:absolute; right:-18px; bottom:-18px"></div>
             <div class="shape eye" style="position:absolute; left:-18px; top:-14px"></div>
           </div>
+        </div>
+      </section>
+
+      <section class="card" aria-labelledby="updatesLabel">
+        <div class="row between center">
+          <h3 id="updatesLabel" class="subtitle">Updates</h3>
+          <button id="updatesToggle" class="btn btn-ghost btn-small" aria-expanded="false" aria-controls="updatesPanel">Show</button>
+        </div>
+        <div id="updatesPanel" class="collapsible">
+          <div id="updatesWrap" class="updates"></div>
         </div>
       </section>
 

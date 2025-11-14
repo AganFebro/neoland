@@ -89,9 +89,36 @@ async function mintOne(id, coll, btn) {
     const e = coll?.mintEndTs != null ? Number(coll.mintEndTs) : null;
     if (s != null && now < s) { showToast('Mint has not started yet', { title: 'Too early', variant: 'error' }); return; }
     if (e != null && now > e) { showToast('Mint is closed', { title: 'Ended', variant: 'error' }); return; }
+    if (coll?.mintPaused) { showToast('Mint is currently paused', { title: 'Paused', variant: 'error' }); return; }
   } catch {}
   const conn = await connectBackpack(); if (!conn) return;
   const { publicKey, provider } = conn;
+  // Optional client-side guard for 1-per-wallet collections
+  try {
+    if (coll?.limitOnePerWallet) {
+      // Check holdings via backend; if already minted, avoid building tx
+      const r = await fetch(`/api/holdings?owner=${encodeURIComponent(publicKey)}&id=${encodeURIComponent(id)}`);
+      if (r.ok) {
+        const j = await r.json();
+        if (Array.isArray(j.items) && j.items.length > 0) {
+          showToast('This collection is limited to 1 mint per wallet, and your wallet already holds one.', { title: 'Limit reached', variant: 'error' });
+          return;
+        }
+      }
+    }
+  } catch {}
+  // Client-side whitelist pre-check
+  try {
+    const r = await fetch(`/api/whitelist?id=${encodeURIComponent(id)}`);
+    if (r.ok) {
+      const j = await r.json();
+      const wl = Array.isArray(j.addresses) ? j.addresses : [];
+      if (wl.length > 0 && !wl.includes(String(publicKey))) {
+        showToast('Your wallet is not on the whitelist for this collection.', { title: 'Not whitelisted', variant: 'error' });
+        return false;
+      }
+    }
+  } catch {}
   if (btn) { btn.disabled = true; btn.textContent = 'Minting...'; }
   try {
     const { Transaction, Connection, Keypair } = await import('https://esm.sh/@solana/web3.js@1.98.0');
@@ -105,6 +132,22 @@ async function mintOne(id, coll, btn) {
         const { rpc } = await getConfig(); const connection = new Connection(rpc, 'confirmed');
         sig = await sendAndTrack(connection, signed2.serialize(), { commitment: 'confirmed', timeoutMs: 120000 });
         mintAddr = r2.mint;
+
+        // If the connected wallet is the collection owner, immediately update metadata
+        try {
+          if (String(coll.owner) === String(publicKey)) {
+            const base = (coll?.metadata_gateway || coll?.metadata_uri || '').trim();
+            let uri = base;
+            if (base.includes('{mint}')) uri = base.replaceAll('{mint}', mintAddr);
+            else if (base.endsWith('/')) uri = base + mintAddr + '.json';
+            else if (base.startsWith('ipfs://') && !base.endsWith('.json') && !base.includes('/')) uri = base + '/' + mintAddr + '.json';
+            const upd = await fetchJSON('/api/tx/update-metadata', { method: 'POST', body: JSON.stringify({ mint: mintAddr, payer: publicKey, name: coll.name, symbol: coll.symbol, metadataUri: uri, royaltyBps: 500, creatorAddrs: [publicKey], collectionMint: coll.collection_mint || null }) });
+            const bufU = Uint8Array.from(atob(upd.tx), c => c.charCodeAt(0));
+            const txU = Transaction.from(bufU);
+            const signedU = await provider.signTransaction(txU);
+            await sendAndTrack(connection, signedU.serialize(), { commitment: 'confirmed', timeoutMs: 120000 });
+          }
+        } catch {}
       } catch (err) {
         const mint = Keypair.generate();
         const r = await fetchJSON('/api/tx/mint-nft', { method: 'POST', body: JSON.stringify({ id, payer: publicKey, mintPubkey: mint.publicKey.toBase58() }) });
@@ -162,6 +205,24 @@ async function renderPage() {
   } catch {}
   document.getElementById('mintTitle').textContent = `Mint ${info.name}`;
   setImgSrc(hero, info.image);
+  // Show whitelist-only badge if applicable
+  try {
+    const r = await fetch(`/api/whitelist?id=${encodeURIComponent(info.id)}`);
+    if (r.ok) {
+      const j = await r.json();
+      if (Array.isArray(j.addresses) && j.addresses.length > 0) {
+        const t = document.getElementById('mintTitle');
+        if (t) {
+          const b = document.createElement('span');
+          b.className = 'mini-badge';
+          b.textContent = '🛡️';
+          b.title = 'Whitelist-only';
+          b.style.marginLeft = '8px';
+          t.appendChild(b);
+        }
+      }
+    }
+  } catch {}
 
   // Stats
   let stats = { floorLamports: null, vol24hLamports: 0, totalVolumeLamports: 0 };
@@ -186,26 +247,33 @@ async function renderPage() {
     if (best) {
       const solAmt = Number(best.priceLamports||0)/1_000_000_000;
       bestEl.textContent = usdPerSol ? `$${(solAmt*usdPerSol).toFixed(2)}` : `${solAmt.toFixed(4)} SOL`;
-      if (bestUsdEl) bestUsdEl.textContent = `${solAmt.toFixed(4)} SOL${cps?` • ≈ ${(solAmt*cps).toFixed(2)} CARV`:''}`;
+      if (bestUsdEl) bestUsdEl.textContent = `${solAmt.toFixed(4)} SOL${cps?` • ${(solAmt*cps).toFixed(2)} CARV`:''}`;
     } else { bestEl.textContent = '—'; if (bestUsdEl) bestUsdEl.textContent=''; }
   } catch {}
 
   // Price + minted count
   const priceRow = document.getElementById('priceRow');
-  const lamports = Number(info.priceLamports || 0);
-  const sol = lamports / 1_000_000_000;
+  const lamports = Number(info.priceLamports || 0); // per-item price
   const usd = Number(prices?.solUsd || 0);
   const carvPerSol = Number(prices?.carvPerSol || 0);
-  const carv = carvPerSol ? sol * carvPerSol : null;
   const minted = Number(info.minted_count || 0); const supply = Number(info.supply || 0);
   // Update minted counter
   const mintedEl = document.getElementById('mintedCount');
   if (mintedEl) mintedEl.textContent = `Items minted: ${minted}${supply ? ` / ${supply}` : ''}`;
   const renderPrice = () => {
-    if (lamports === 0) { priceRow.innerHTML = `<strong>Price:</strong> Free`; return; }
-    const solTxt = `${sol} SOL`;
-    const carvTxt = carv != null ? ` • ≈ ${carv.toFixed(2)} CARV` : '';
-    const usdTxt = usd ? ` • ≈ $${(sol*usd).toFixed(2)}` : '';
+    if (!priceRow) return;
+    if (lamports === 0) {
+      priceRow.innerHTML = `<strong>Price:</strong> Free`;
+      return;
+    }
+    const qtyRaw = document.getElementById('qty')?.textContent || '1';
+    const qty = Math.max(1, Number(qtyRaw) || 1);
+    const totalLamports = lamports * qty;
+    const solAmt = totalLamports / 1_000_000_000;
+    const carvAmt = carvPerSol ? solAmt * carvPerSol : null;
+    const solTxt = `${solAmt.toFixed(4)} SOL`;
+    const carvTxt = carvAmt != null ? ` • ${carvAmt.toFixed(2)} CARV` : '';
+    const usdTxt = usd ? ` • $${(solAmt * usd).toFixed(2)}` : '';
     priceRow.innerHTML = `<strong>Price:</strong> ${solTxt}${carvTxt}${usdTxt}`;
   };
   renderPrice();
@@ -229,7 +297,10 @@ async function renderPage() {
     const s = info.mintStartTs != null ? Number(info.mintStartTs) : null;
     const e = info.mintEndTs != null ? Number(info.mintEndTs) : null;
     const fmt = (t) => t ? new Date(t*1000).toLocaleString() : '';
-    if (s != null || e != null) {
+    if (info.mintPaused) {
+      if (note) note.textContent = 'Mint is currently paused by the developer.';
+      if (btnMint) btnMint.disabled = true;
+    } else if (s != null || e != null) {
       if (s != null && now < s) { if (note) note.textContent = `Opens at ${fmt(s)} (${Intl.DateTimeFormat().resolvedOptions().timeZone})`; if (btnMint) btnMint.disabled = true; }
       else if (e != null && now > e) { if (note) note.textContent = `Mint closed at ${fmt(e)} (${Intl.DateTimeFormat().resolvedOptions().timeZone})`; if (btnMint) btnMint.disabled = true; }
       else { if (note) note.textContent = s != null ? `Open until ${fmt(e)}` : ''; }
@@ -249,9 +320,21 @@ async function renderPage() {
   } catch {}
 
   // Quantity controls (single mint logic; UI only)
-  let qty = 1; const setQty = (n) => { qty = Math.max(1, Math.min(10, Number(n)||1)); qtyEl.textContent = String(qty); };
-  document.getElementById('qtyMinus')?.addEventListener('click', () => setQty(qty-1));
-  document.getElementById('qtyPlus')?.addEventListener('click', () => setQty(qty+1));
+  const limitOne = !!info.limitOnePerWallet;
+  let qty = 1; const setQty = (n) => {
+    const max = limitOne ? 1 : 10;
+    qty = Math.max(1, Math.min(max, Number(n)||1));
+    qtyEl.textContent = String(qty);
+    renderPrice();
+  };
+  const btnMinus = document.getElementById('qtyMinus');
+  const btnPlus = document.getElementById('qtyPlus');
+  btnMinus?.addEventListener('click', () => setQty(qty-1));
+  btnPlus?.addEventListener('click', () => setQty(qty+1));
+  if (limitOne) {
+    if (btnMinus) btnMinus.disabled = true;
+    if (btnPlus) btnPlus.disabled = true;
+  }
 
   btnMint?.addEventListener('click', async () => {
     const btn = btnMint; btn.disabled = true; btn.textContent = 'Minting...';
@@ -263,6 +346,7 @@ async function renderPage() {
         const e = info.mintEndTs != null ? Number(info.mintEndTs) : null;
         if (s != null && now < s) { showToast('Mint has not started yet', { title: 'Too early', variant: 'error' }); return; }
         if (e != null && now > e) { showToast('Mint is closed', { title: 'Ended', variant: 'error' }); return; }
+        if (info.mintPaused) { showToast('Mint is currently paused', { title: 'Paused', variant: 'error' }); return; }
       } catch {}
       // Supply check before any build
       const supply = Number(info.supply || 0);
@@ -280,6 +364,15 @@ async function renderPage() {
         const { Transaction, Connection, Keypair } = await import('https://esm.sh/@solana/web3.js@1.98.0');
         const conn = await connectBackpack(); if (!conn) return;
         const { publicKey, provider } = conn;
+        // Whitelist pre-check for batch
+        try {
+          const r = await fetch(`/api/whitelist?id=${encodeURIComponent(info.id)}`);
+          if (r.ok) {
+            const j = await r.json();
+            const wl = Array.isArray(j.addresses) ? j.addresses : [];
+            if (wl.length > 0 && !wl.includes(String(publicKey))) { showToast('Your wallet is not on the whitelist for this collection.', { title: 'Not whitelisted', variant: 'error' }); return; }
+          }
+        } catch {}
         // Ask server for max batch-per-tx
         const est = await fetchJSON('/api/tx/mint-nft-batch-estimate', { method: 'POST', body: JSON.stringify({ id: info.id, payer: publicKey, want: qty, currencyMint: state.currency === 'CARV' ? CARV_MINT : null }) });
         const maxPerTx = Math.max(1, Math.min(Number(est.max || 1), qty));

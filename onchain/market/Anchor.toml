@@ -1,5 +1,9 @@
 [programs.localnet]
-market = "MARKET_PROGRAM_ID_PLACEHOLDER"
+market = "FXgJiqiHFV1DjMWdWi3fPX12mZinx6GrrxsYsfCXn64n"
+
+# If you use testnet/mainnet in Anchor workflows, mirror the mapping:
+[programs.testnet]
+market = "FXgJiqiHFV1DjMWdWi3fPX12mZinx6GrrxsYsfCXn64n"
 
 [provider]
 # Use a valid URL or one of: localnet, devnet, testnet, mainnet

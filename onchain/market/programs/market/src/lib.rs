@@ -2,7 +2,9 @@ use anchor_lang::prelude::*;
 use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::token::{self, CloseAccount, Mint, Token, TokenAccount, Transfer};
 
-declare_id!("MARKET111111111111111111111111111111111111");
+// IMPORTANT: Must match the deployed program id.
+// Updated to resolve DeclaredProgramIdMismatch during runtime.
+declare_id!("FXgJiqiHFV1DjMWdWi3fPX12mZinx6GrrxsYsfCXn64n");
 
 #[program]
 pub mod market {
@@ -53,21 +55,40 @@ pub mod market {
         Ok(())
     }
 
-    pub fn buy(ctx: Context<Buy>) -> Result<()> {
+    pub fn buy(ctx: Context<Buy>, royalty_bps: u16, creator: Pubkey) -> Result<()> {
         let price = ctx.accounts.listing.price;
         // Only allow SOL path when payment_mint is default (all zeros)
         require!(ctx.accounts.listing.payment_mint == Pubkey::default(), MarketError::WrongCurrency);
 
-        // Transfer SOL from buyer to seller
-        let ix = anchor_lang::solana_program::system_instruction::transfer(
-            &ctx.accounts.buyer.key(),
-            &ctx.accounts.seller.key(),
-            price,
-        );
-        anchor_lang::solana_program::program::invoke(
-            &ix,
-            &[ctx.accounts.buyer.to_account_info(), ctx.accounts.seller.to_account_info(), ctx.accounts.system_program.to_account_info()],
-        )?;
+        // Calculate royalty and remainder
+        let royalty_amount: u64 = (price.saturating_mul(royalty_bps as u64)) / 10_000u64;
+        let remainder: u64 = price.saturating_sub(royalty_amount);
+
+        // Transfer SOL royalty to creator
+        if royalty_amount > 0 {
+            let ix1 = anchor_lang::solana_program::system_instruction::transfer(
+                &ctx.accounts.buyer.key(),
+                &creator,
+                royalty_amount,
+            );
+            anchor_lang::solana_program::program::invoke(
+                &ix1,
+                &[ctx.accounts.buyer.to_account_info(), ctx.accounts.creator.to_account_info(), ctx.accounts.system_program.to_account_info()],
+            )?;
+        }
+
+        // Transfer SOL remainder to seller
+        if remainder > 0 {
+            let ix2 = anchor_lang::solana_program::system_instruction::transfer(
+                &ctx.accounts.buyer.key(),
+                &ctx.accounts.seller.key(),
+                remainder,
+            );
+            anchor_lang::solana_program::program::invoke(
+                &ix2,
+                &[ctx.accounts.buyer.to_account_info(), ctx.accounts.seller.to_account_info(), ctx.accounts.system_program.to_account_info()],
+            )?;
+        }
 
         // Transfer NFT from escrow to buyer
         let mint_key = ctx.accounts.mint.key();
@@ -96,18 +117,36 @@ pub mod market {
 
     // SPL-token settlement path (e.g., CARV). Transfers `listing.price` base units of
     // `payment_mint` from buyer -> seller, then moves the NFT from escrow to buyer.
-    pub fn buy_spl(ctx: Context<BuySpl>) -> Result<()> {
+    pub fn buy_spl(ctx: Context<BuySpl>, royalty_bps: u16, _creator: Pubkey) -> Result<()> {
         // Validate currency matches listing
         require!(ctx.accounts.listing.payment_mint == ctx.accounts.payment_mint.key(), MarketError::WrongCurrency);
 
-        // Transfer SPL payment from buyer to seller (amount stored in `price` field)
-        let pay_accounts = Transfer {
-            from: ctx.accounts.buyer_payment_token.to_account_info(),
-            to: ctx.accounts.seller_payment_token.to_account_info(),
-            authority: ctx.accounts.buyer.to_account_info(),
-        };
-        let pay_ctx = CpiContext::new(ctx.accounts.token_program.to_account_info(), pay_accounts);
-        token::transfer(pay_ctx, ctx.accounts.listing.price)?;
+        // Calculate royalty and remainder in token units
+        let price = ctx.accounts.listing.price;
+        let royalty_amount: u64 = (price.saturating_mul(royalty_bps as u64)) / 10_000u64;
+        let remainder: u64 = price.saturating_sub(royalty_amount);
+
+        // Transfer SPL royalty from buyer -> creator ATA
+        if royalty_amount > 0 {
+            let r_accounts = Transfer {
+                from: ctx.accounts.buyer_payment_token.to_account_info(),
+                to: ctx.accounts.creator_payment_token.to_account_info(),
+                authority: ctx.accounts.buyer.to_account_info(),
+            };
+            let r_ctx = CpiContext::new(ctx.accounts.token_program.to_account_info(), r_accounts);
+            token::transfer(r_ctx, royalty_amount)?;
+        }
+
+        // Transfer remainder from buyer -> seller ATA
+        if remainder > 0 {
+            let pay_accounts = Transfer {
+                from: ctx.accounts.buyer_payment_token.to_account_info(),
+                to: ctx.accounts.seller_payment_token.to_account_info(),
+                authority: ctx.accounts.buyer.to_account_info(),
+            };
+            let pay_ctx = CpiContext::new(ctx.accounts.token_program.to_account_info(), pay_accounts);
+            token::transfer(pay_ctx, remainder)?;
+        }
 
         // Transfer NFT from escrow to buyer
         let mint_key = ctx.accounts.mint.key();
@@ -203,6 +242,9 @@ pub struct Buy<'info> {
     /// CHECK: paid via system transfer
     #[account(mut)]
     pub seller: UncheckedAccount<'info>,
+    /// CHECK: creator receives royalty via system transfer
+    #[account(mut)]
+    pub creator: UncheckedAccount<'info>,
     pub mint: Account<'info, Mint>,
     #[account(
         mut,
@@ -237,6 +279,9 @@ pub struct BuySpl<'info> {
     /// CHECK: paid via token transfer
     #[account(mut)]
     pub seller: UncheckedAccount<'info>,
+    /// CHECK: creator receives royalty via token transfer
+    #[account(mut)]
+    pub creator: UncheckedAccount<'info>,
     pub mint: Account<'info, Mint>,
     #[account(
         mut,
@@ -272,6 +317,12 @@ pub struct BuySpl<'info> {
         associated_token::authority = seller,
     )]
     pub seller_payment_token: Account<'info, TokenAccount>,
+    #[account(
+        mut,
+        associated_token::mint = payment_mint,
+        associated_token::authority = creator,
+    )]
+    pub creator_payment_token: Account<'info, TokenAccount>,
     pub token_program: Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,

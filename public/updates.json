@@ -1,0 +1,14 @@
+[
+  {
+    "ts": 1731436800,
+    "title": "Offers: Prevent self-accept",
+    "body": "You can no longer accept your own collection offer from the same wallet. UI hides the button and backend rejects the call.",
+    "url": "/market"
+  },
+  {
+    "ts": 1731350400,
+    "title": "Market improvements",
+    "body": "Added floor price display and pagination on Market collections.",
+    "url": "/market"
+  }
+]

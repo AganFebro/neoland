@@ -16,6 +16,10 @@
       })();
     </script>
     <link rel="stylesheet" href="/styles.css" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/favicon/apple-touch-icon.png" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon/favicon-16x16.png" />
+    <link rel="icon" href="/favicon/favicon.ico" />
   </head>
   <body class="page-market-coll">
     <header class="nb-header">
@@ -26,6 +30,7 @@
           <a href="/deploy" class="nav-link">Deploy</a>
           <a href="/mint" class="nav-link">Mint</a>
           <a href="/market" class="nav-link active">Market</a>
+          <a href="https://discord.gg/gFeFGf64JY" class="nav-link nav-link-discord" target="_blank" rel="noopener noreferrer">Neobot</a>
         </nav>
         <div class="row gap center">
           <span id="networkBadge" class="badge" title="Network"></span>
@@ -36,8 +41,20 @@
     </header>
 
     <main class="container">
+      <div class="ticker" aria-label="neobot announcement">
+        <div class="ticker-track">
+          <span>neobot — your AI agent to deploy NFTs from your Discord server</span>
+          <span>neobot — your AI agent to deploy NFTs from your Discord server</span>
+          <span>neobot — your AI agent to deploy NFTs from your Discord server</span>
+          <span>neobot — your AI agent to deploy NFTs from your Discord server</span>
+        </div>
+      </div>
+
       <section class="card">
         <span class="badge-sticker">COLLECTION</span>
+        <div id="collHero" class="coll-hero" aria-hidden="true">
+          <img id="collHeroImg" alt="Collection preview" loading="lazy" />
+        </div>
         <div class="toolbar">
           <div class="stack">
             <h3 id="collTitle" class="subtitle">Collection</h3>
@@ -47,13 +64,15 @@
               <div class="stat"><div class="label">24H Volume</div><div class="value" id="statVol24">—</div><div class="sub" id="statVol24Usd"></div></div>
               <div class="stat"><div class="label">Total Volume</div><div class="value" id="statVolTotal">—</div><div class="sub" id="statVolTotalUsd"></div></div>
             </div>
+            <input id="itemSearch" class="input-search mt" placeholder="Search by mint" />
             <div class="row gap mt" role="tablist" aria-label="Collection sections">
               <button id="tabItems" class="btn btn-ghost" role="tab" aria-selected="true">Items</button>
               <button id="tabActivity" class="btn btn-ghost" role="tab" aria-selected="false">Activity</button>
               <button id="tabOwned" class="btn btn-ghost" role="tab" aria-selected="false">Owned</button>
+              <button id="tabListed" class="btn btn-ghost" role="tab" aria-selected="false">Listed</button>
             </div>
           </div>
-          <input id="itemSearch" class="input-search" placeholder="Search by mint" />
+          <div class="stack" style="gap:10px; align-items:flex-start"></div>
         </div>
         <section id="sectionItems">
           <div id="itemsWrap" class="grid">
@@ -69,6 +88,12 @@
         </section>
         <section id="sectionOwned" class="hidden">
           <div id="ownedWrap" class="grid">
+            <div class="skeleton block"></div>
+            <div class="skeleton text"></div>
+          </div>
+        </section>
+        <section id="sectionListed" class="hidden">
+          <div id="listedWrap" class="grid">
             <div class="skeleton block"></div>
             <div class="skeleton text"></div>
           </div>

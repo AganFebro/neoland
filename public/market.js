@@ -1,4 +1,4 @@
-import { fetchJSON, connectBackpack, showToast, getConfig, txExplorerUrl, waitForConfirmation, sendAndTrack, setImgSrc, showPrompt } from '/common.js?v=2';
+import { fetchJSON, connectBackpack, showToast, getConfig, txExplorerUrl, waitForConfirmation, sendAndTrack, setImgSrc, showPrompt, renderUpdates, setupCollapsible } from '/common.js?v=2';
 
 const CARV_MINT = 'D7WVEw9Pkf4dfCCE3fwGikRCCTvm9ipqTYPHRENLiw3s';
 let __prices = null; // { solUsd, carvUsd, carvPerSol, _ts }
@@ -99,9 +99,8 @@ async function renderCollectionsTable() { // kept name to avoid changing init wi
         const carvTxt = (solFloor != null && carvPerSol) ? ` • ≈ ${(solFloor*carvPerSol).toFixed(2)} CARV` : '';
         const usdTxt = (solFloor != null && usd) ? ` • ≈ $${(solFloor*usd).toFixed(2)}` : '';
         el.innerHTML = `
+          <div class="meta"><strong>${r.name}</strong> <span>(${r.symbol})</span> <span class="small muted">• ${r.id}</span></div>
           <img alt="${r.name}" loading="lazy" />
-          <div class="meta"><strong>${r.name}</strong> <span>(${r.symbol})</span></div>
-          <div class="meta small muted">${r.id}</div>
           <div class="meta"><strong>Floor:</strong> ${solFloor != null ? `${solFloor.toFixed(4)} SOL${carvTxt}${usdTxt}` : '—'}</div>
           <div class="meta"><strong>Listed:</strong> ${r.listed} / ${r.supply || 0}</div>
           <div class="row gap mt">
@@ -188,149 +187,6 @@ async function renderMarketListInto(wrap, listings) {
   });
 }
 
-async function renderHoldingsForListing(publicKey) {
-  const wrap = document.getElementById('marketHoldings');
-  wrap.innerHTML = '<div class="skeleton block"></div><div class="skeleton text"></div>';
-  try {
-    const { items } = await fetchJSON(`/api/holdings-all?owner=${publicKey}`);
-    if (!items || items.length === 0) {
-      wrap.innerHTML = '<div class="muted">No NFTs found in your wallet</div>';
-      return;
-    }
-    wrap.innerHTML = '';
-    items.forEach((it) => {
-      const el = document.createElement('div');
-      el.className = 'nft';
-      el.innerHTML = `
-        <img alt="NFT" loading="lazy" />
-        <div class="meta"><strong>${it.name}</strong> <span>(${it.symbol})</span></div>
-        <div class="meta"><strong>Mint:</strong> ${it.mint}</div>
-        <div class="row gap mt">
-          <button class="btn" data-mint="${it.mint}" data-cid="${it.collectionId}">List for Sale</button>
-        </div>
-      `;
-      setImgSrc(el.querySelector('img'), it.image);
-      el.querySelector('button').onclick = async (ev) => {
-        // Custom modal with SOL/CARV toggle inside
-        const prices = await getPrices();
-        const usdPerSol = prices.solUsd || null;
-        const carvUsd = prices.carvUsd || null;
-        const overlay = document.createElement('div'); overlay.className = 'modal-overlay';
-        const modal = document.createElement('div'); modal.className = 'modal';
-        modal.innerHTML = `
-          <div class="title">List for Sale</div>
-          <div class="row gap" role="tablist" aria-label="Currency">
-            <button class="btn btn-ghost cur cur-sol" role="tab" aria-selected="true">SOL</button>
-            <button class="btn btn-ghost cur cur-carv" role="tab" aria-selected="false">CARV</button>
-          </div>
-          <label class="label" for="listPrice">Enter price (min 0.003 SOL or 1 CARV)</label>
-          <input id="listPrice" class="input" type="number" placeholder="0.05" value="0.05" min="0.000000001" step="0.000000001" />
-          <div class="hint small muted" style="margin-top:6px"></div>
-          <div class="error" role="alert" aria-live="polite" style="display:none"></div>
-          <div class="row gap mt right actions">
-            <button type="button" class="btn btn-ghost cancel">Cancel</button>
-            <button type="button" class="btn confirm">List NFT</button>
-          </div>
-        `;
-        overlay.appendChild(modal); document.body.appendChild(overlay);
-        const btnSol = modal.querySelector('.cur-sol');
-        const btnCarv = modal.querySelector('.cur-carv');
-        const input = modal.querySelector('#listPrice');
-        const hint = modal.querySelector('.hint');
-        const error = modal.querySelector('.error');
-        let useCarv = false;
-        const setMode = (carv) => {
-          useCarv = !!carv;
-          btnSol.setAttribute('aria-selected', String(!useCarv));
-          btnCarv.setAttribute('aria-selected', String(useCarv));
-          input.placeholder = useCarv ? '8.40' : '0.05';
-          renderHint();
-        };
-        const renderHint = () => {
-          const v = Number(String(input.value).trim());
-          error.style.display = 'none'; error.textContent = '';
-          if (!isFinite(v) || v <= 0) { hint.textContent = ''; return; }
-          if (useCarv && carvUsd && usdPerSol) {
-            const usd = v * carvUsd; const sol = usd / usdPerSol;
-            hint.textContent = `≈ ${sol.toFixed(4)} SOL • ≈ $${usd.toFixed(2)}`;
-          } else if (!useCarv && usdPerSol) {
-            const usd = v * usdPerSol; let carvTxt = '';
-            if (carvUsd) { const carv = usd / carvUsd; carvTxt = ` • ≈ ${carv.toFixed(2)} CARV`; }
-            hint.textContent = `≈ $${usd.toFixed(2)}${carvTxt}`;
-          } else {
-            hint.textContent = '';
-          }
-        };
-        btnSol.addEventListener('click', () => setMode(false));
-        btnCarv.addEventListener('click', () => setMode(true));
-        input.addEventListener('input', renderHint);
-        setMode(false);
-        const close = (result) => { overlay.classList.add('closing'); setTimeout(() => overlay.remove(), 160); return result; };
-        const awaitResult = () => new Promise((res) => {
-          modal.querySelector('.cancel').addEventListener('click', () => res(close(null)));
-          modal.querySelector('.confirm').addEventListener('click', () => {
-            const v = Number(String(input.value).trim());
-            if (!isFinite(v) || v <= 0) { error.textContent = 'Please enter a valid number.'; error.style.display = ''; return; }
-            if (!useCarv && v < 0.003) { error.textContent = 'Minimum price is 0.003 SOL.'; error.style.display = ''; return; }
-            if (useCarv && v < 1) { error.textContent = 'Minimum price is 1 CARV.'; error.style.display = ''; return; }
-            res(close({ useCarv, value: v }));
-          });
-          overlay.addEventListener('click', (e) => { if (e.target === overlay) res(close(null)); });
-          modal.addEventListener('keydown', (e) => { if (e.key === 'Escape') res(close(null)); if (e.key === 'Enter') modal.querySelector('.confirm').click(); });
-        });
-        const sel = await awaitResult();
-        if (!sel) return;
-        let currencyMint = null; let priceAmount = null; let priceSol = null;
-        if (sel.useCarv) {
-          currencyMint = CARV_MINT;
-          // Convert CARV UI units to base units (9 decimals)
-          priceAmount = Math.round(sel.value * 1_000_000_000);
-        } else {
-          priceSol = sel.value;
-        }
-        const btn = ev.target; btn.disabled = true; btn.textContent = 'Listing...';
-        try {
-          const conn = await connectBackpack();
-          if (!conn) throw new Error('Wallet not connected');
-          const { provider, publicKey: pk } = conn;
-          const { Transaction, Connection } = await import('https://esm.sh/@solana/web3.js@1.98.0');
-          // Build on-chain list tx
-          const body = currencyMint ? { mint: it.mint, seller: pk, currencyMint, priceAmount } : { mint: it.mint, seller: pk, priceSol };
-          const r = await fetchJSON('/api/market/tx/list', { method: 'POST', body: JSON.stringify(body) });
-          const buf = Uint8Array.from(atob(r.tx), c => c.charCodeAt(0));
-          const tx = Transaction.from(buf);
-          const signed = await provider.signTransaction(tx);
-          const { rpc } = await getConfig();
-          const connection = new Connection(rpc, 'confirmed');
-          const sig = await sendAndTrack(connection, signed.serialize(), { commitment: 'confirmed', timeoutMs: 120000 });
-          try {
-            await waitForConfirmation(connection, sig, { timeoutMs: 90000, desired: 'confirmed' });
-          } catch (e) {
-            showToast('Network slow to confirm. Check explorer.', { title: 'Pending', variant: 'info', actions: [ { label: 'View on Explorer', onClick: async () => window.open(await txExplorerUrl(sig), '_blank') } ] });
-          }
-          // Index off-chain after chain success
-          const idxBody = currencyMint ? { mint: it.mint, collectionId: it.collectionId, seller: pk, currencyMint, priceAmount } : { mint: it.mint, collectionId: it.collectionId, seller: pk, priceSol };
-          await fetchJSON('/api/market/list', { method: 'POST', body: JSON.stringify(idxBody) });
-          const t = showToast('Listing created on-chain.<br/>Refreshing in <span id="listRefresh">5</span>s…', { title: 'Listed', variant: 'success', actions: [ { label: 'View on Explorer', onClick: async () => window.open(await txExplorerUrl(sig), '_blank') } ] });
-          await Promise.all([renderCollectionsTable(), renderMyListings(pk)]);
-          // Auto refresh after brief countdown
-          let n = 5;
-          const span = t?.querySelector?.('#listRefresh');
-          const timer = setInterval(() => { n -= 1; if (span) span.textContent = String(n); if (n <= 0) { clearInterval(timer); location.reload(); } }, 1000);
-        } catch (e) {
-          console.error(e);
-          showToast((e.message || String(e)), { title: 'List failed', variant: 'error' });
-        } finally {
-          btn.disabled = false; btn.textContent = 'List for Sale';
-        }
-      };
-      wrap.appendChild(el);
-    });
-  } catch (e) {
-    console.error(e);
-    wrap.innerHTML = '<div class="muted">Failed to load your holdings</div>';
-  }
-}
 
 async function renderMyListings(publicKey) {
   const wrap = document.getElementById('myListings');
@@ -413,22 +269,13 @@ async function init() {
     renderCollectionsTable();
     document.getElementById('collectionsWrap')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   });
+  // Render site updates
+  renderUpdates('#updatesWrap', { limit: 3 }).catch(console.error);
+  setupCollapsible({ button: '#updatesToggle', panel: '#updatesPanel', open: false });
   await renderCollectionsTable();
-  const connectBtn = document.getElementById('marketConnect');
   const conn = await connectBackpack({ silent: true });
   if (conn) {
-    connectBtn.style.display = 'none';
-    await renderHoldingsForListing(conn.publicKey);
     await renderMyListings(conn.publicKey);
-  } else {
-    connectBtn.addEventListener('click', async () => {
-      const c = await connectBackpack();
-      if (c) {
-        connectBtn.style.display = 'none';
-        await renderHoldingsForListing(c.publicKey);
-        await renderMyListings(c.publicKey);
-      }
-    });
   }
 }
 

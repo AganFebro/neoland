@@ -7,17 +7,42 @@ create table if not exists public.collections (
   symbol text not null,
   supply integer not null default 0,
   price_lamports bigint not null default 0,
+  -- If true, each wallet can mint at most one NFT from this collection
+  limit_one_per_wallet boolean not null default false,
+  -- Creator royalty in basis points (e.g., 500 = 5%)
+  royalty_bps integer not null default 0,
   mint_start_ts bigint,
   mint_end_ts bigint,
   trading_paused boolean not null default false,
+  mint_paused boolean not null default false,
+  -- Parent collection NFT (for Metaplex verified collections)
+  collection_mint text,
+  -- Default mutability for new mints
+  lock_new_mints boolean not null default false,
+  -- Optional whitelist as JSON array of base58 addresses
+  whitelist jsonb,
+  -- Optional marketplace-facing cover and metadata for the parent collection NFT
+  collection_cover_cid text,
+  collection_cover_gateway text,
+  collection_meta_uri text,
+  collection_meta_gateway text,
   image_cid text,
   image_gateway text,
   metadata_uri text,
   metadata_gateway text,
   minted_count integer not null default 0,
   created_at bigint not null,
+  discord_id text,
   onchain_pda text
 );
+
+-- Backward‑compat: add royalty_bps to existing deployments
+alter table if exists public.collections
+  add column if not exists royalty_bps integer not null default 0;
+
+-- Per-wallet mint limit flag
+alter table if exists public.collections
+  add column if not exists limit_one_per_wallet boolean not null default false;
 
 create table if not exists public.mints (
   mint text primary key,
