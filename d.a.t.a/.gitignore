@@ -1,0 +1,17 @@
+code_design.go
+d.a.t.a_code.go
+src/.env
+.env
+d.a.t.a.json
+d.a.t.a
+
+.cursorrules
+.cursorignore
+
+.vscode/
+.idea/
+
+main
+data/*
+local
+data

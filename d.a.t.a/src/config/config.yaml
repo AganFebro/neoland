@@ -1,0 +1,105 @@
+character:
+  # Path to character configuration file
+  path: "./src/config/character_data_agent.json"
+  name: "neobot"
+
+database:
+  # Database type: "sqlite" or "postgres"
+  type: "sqlite"
+  # Database path (for SQLite) or connection string (for Postgres)
+  path: "./data/agent.db"
+
+llm_config:
+  # LLM provider: "openai", "deepseek", etc.
+  provider: "deepseek"
+  # API key for the LLM provider
+  api_key: ""
+  # Base URL for API calls
+  base_url: "https://api.deepseek.com"
+  # Model name
+  model: "deepseek-chat"
+
+data:
+  carvid:
+    # CarvID API endpoint
+    url: "https://api.carv.io/v1"
+    # API key for CarvID
+    api_key: ""
+
+
+token:
+  network: "base"
+  ticker: "carv"
+  contract_addr: "0xc08cd26474722ce93f4d0c34d16201461c10aa8c"
+
+# Internal deploy API configuration
+deploy:
+  # Set to your server URL. Examples:
+  #   local:  "http://localhost:3000"
+  #   prod:   "https://your-prod-host"
+  base_url: ""
+  # Optional bearer token for auth (also overridable by DEPLOY_API_KEY env)
+  api_key: ""
+  # Endpoint path for deployment
+  path: ""
+  # Optional default payer/owner addresses (for backends that require them)
+  payer: ""
+  owner: ""
+  owner_secret: ""
+  # Debug: save a local copy of images pinned via /api/pin/image
+  save_pin_images: true
+  save_dir: "./data/tmp"
+
+social:
+  twitter:
+    mode: ""
+    username: ""
+    password: ""
+    api_key: ""
+    api_key_secret: ""
+    access_token: ""
+    token_secret: ""
+    monitor_window: 0
+  discord:
+    api_token: ""
+  telegram:
+    bot_token: ""
+    channel_id: 0
+    debug: false
+
+web:
+  port: 8000
+
+plugins:
+  d.a.t.a:
+    name: "d.a.t.a"
+    enabled: true
+    version: "1.0.0"
+    author: "CARV Protocol"
+    description: "Core data interaction plugin for Ethereum blockchain analysis"
+    dependencies: []
+    options:
+      api_url: "your-api-url-here"
+      auth_token: "your-auth-token-here"
+      chain: "ethereum-mainnet"
+      llm:
+        model: "deepseek-chat"
+        max_tokens: 2000
+        temperature: 0.7
+
+  wallet:
+    name: "evm-wallet"
+    enabled: false
+    version: "1.0.0"
+    author: "CARV Protocol"
+    description: "Wallet plugin for EVM blockchain"
+    dependencies: []
+    options:
+      # Private key for the wallet
+      private_key: "your-private-key-here"
+      # Network: "base" or "ethereum"
+      network: "base-mainnet"
+      # RPC URL
+      rpc_url: "https://base.llamarpc.com"
+      chain_id: 8453
+      timeout: 30s
