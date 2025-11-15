@@ -117,18 +117,23 @@ func shouldReact(
 		return true
 	}
 
-    /* check if bot was mentioned in the message */
-    for _, mention := range message.Mentions {
-        if mention.ID == me.ID {
-            return true
-        }
-    }
+	/* check if bot was mentioned in the message */
+	for _, mention := range message.Mentions {
+		if mention.ID == me.ID {
+			return true
+		}
+	}
 
-    // Also react to public messages that clearly ask for deploy without a mention
-    content := strings.ToLower(message.Content)
-    if strings.Contains(content, "deploy") && strings.Contains(content, "nft") {
-        return true
-    }
+	// Also react to public messages that clearly ask for deploy
+	// or mint actions even without an explicit mention.
+	content := strings.ToLower(message.Content)
+	if strings.Contains(content, "deploy") && strings.Contains(content, "nft") {
+		return true
+	}
+	if strings.Contains(content, "mint") &&
+		(strings.Contains(content, "collection") || strings.Contains(content, "collection id")) {
+		return true
+	}
 
-    return false
+	return false
 }

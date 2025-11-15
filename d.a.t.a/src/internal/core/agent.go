@@ -4,6 +4,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -188,6 +189,18 @@ func (a *Agent) processMessage(msg *SocialMessage) error {
         }
     }()
 
+    if msg == nil {
+        return fmt.Errorf("nil social message")
+    }
+
+    if msg.Platform == "discord" {
+        a.logger.Infow(
+            "Discord message received",
+            "from", msg.FromUser,
+            "content", msg.Content,
+        )
+    }
+
     // Log any Discord image attachments for visibility
     if msg.Platform == "discord" && msg.Metadata != nil {
         if raw, ok := msg.Metadata["attachments"]; ok {
@@ -235,9 +248,25 @@ func (a *Agent) processMessage(msg *SocialMessage) error {
             a.logger.Errorw("wallet privacy handler failed", "error", err)
         }
 
+        // Quick help/commands cheat-sheet – DM plus short ack in channel.
+        // Only trigger when the user is clearly asking for help/commands,
+        // not when they say things like "help me deploy...".
+        if (strings.Contains(lower, "commands") ||
+            (strings.Contains(lower, "help") &&
+                !strings.Contains(lower, "deploy") &&
+                !strings.Contains(lower, "mint"))) && a.deployClient != nil {
+            if err = a.handleHelp(msg); err == nil {
+                return nil
+            }
+            a.logger.Errorw("help handler failed", "error", err)
+        }
+
         if a.deployClient != nil {
-            // Simple collection id lookup: "collection id for X"
-            if strings.Contains(lower, "collection id") && strings.Contains(lower, " for ") {
+            // Simple collection id lookup: "collection id for X".
+            // Be strict so we do not steal mint intents like
+            // "mint this nft for me, the collection id is ...".
+            if strings.Contains(lower, "collection id for ") &&
+                !strings.Contains(lower, "mint") {
                 if err = a.handleCollectionLookup(msg); err == nil {
                     return nil
                 }
@@ -245,12 +274,66 @@ func (a *Agent) processMessage(msg *SocialMessage) error {
             }
 
             // Discord mint intent
-            if mintParams, ok := nftdeploy.TryExtractMintParamsFast(msg.Content); ok {
-                a.logger.Infow("NFT mint fast-parse succeeded", "collection_id", mintParams.CollectionID, "quantity", mintParams.Quantity, "currency", mintParams.Currency)
-                if err = a.handleNFTMint(msg, mintParams); err == nil {
+            if strings.Contains(lower, "mint") &&
+                !strings.Contains(lower, "deploy") &&
+                !strings.Contains(lower, "launch") {
+                a.logger.Infow("Discord mint intent detected", "content", msg.Content)
+                handled := false
+
+                if mintParams, ok := nftdeploy.TryExtractMintParamsFast(msg.Content); ok {
+                    a.logger.Infow(
+                        "NFT mint fast-parse succeeded",
+                        "collection_id", mintParams.CollectionID,
+                        "quantity", mintParams.Quantity,
+                        "currency", mintParams.Currency,
+                    )
+                    if err = a.handleNFTMint(msg, mintParams); err == nil {
+                        return nil
+                    }
+                    handled = true
+                    a.logger.Errorw("NFT mint via fast-parse failed", "error", err)
+                }
+
+                if !handled && a.cognitive != nil {
+                    // Fallback to LLM extraction so mint commands
+                    // can use more natural language.
+                    mp2, ok2, e2 := nftdeploy.ExtractMintParamsLLM(
+                        a.ctx,
+                        a.cognitive.Client(),
+                        a.cognitive.Model(),
+                        msg.Content,
+                    )
+                    if e2 != nil {
+                        a.logger.Errorw("NFT mint LLM-parse error", "error", e2)
+                    } else if ok2 {
+                        a.logger.Infow(
+                            "NFT mint LLM-parse succeeded",
+                            "collection_id", mp2.CollectionID,
+                            "quantity", mp2.Quantity,
+                            "currency", mp2.Currency,
+                        )
+                        if err = a.handleNFTMint(msg, mp2); err == nil {
+                            return nil
+                        }
+                        handled = true
+                        a.logger.Errorw("NFT mint via LLM-parse failed", "error", err)
+                    }
+                }
+
+                if !handled {
+                    // Looks like a mint request but we could not
+                    // confidently extract a collection id.
+                    guidance := "I think you want to mint from a collection, but I couldn’t clearly read the collection id. " +
+                        "Please include a short id like `2feczajn` in your message, for example: " +
+                        "`@neobot-test mint this NFT, collection id 2feczajn`."
+                    _ = a.socialClient.SendMessage(a.ctx, SocialMessage{
+                        Platform: msg.Platform,
+                        Type:     "Response",
+                        Content:  guidance,
+                        Metadata: msg.Metadata,
+                    })
                     return nil
                 }
-                a.logger.Errorw("NFT mint via fast-parse failed", "error", err)
             }
 
             // Discord deploy intent
@@ -466,6 +549,15 @@ func (a *Agent) handleNFTDeploy(msg *SocialMessage, p nftdeploy.Params) error {
         a.logger.Errorw("Deploy NFT failed", "error", err)
         // Continue to register off-chain so mint page can show the collection,
         // even if on-chain init tx wasn't built. The user can re-init later.
+    } else {
+        // Best-effort cleanup of any locally saved image copy
+        if pth := a.deployClient.LastSavedFile(); pth != "" {
+            if rmErr := os.Remove(pth); rmErr != nil {
+                a.logger.Warnw("Failed to remove local image copy", "path", pth, "error", rmErr)
+            } else {
+                a.logger.Infow("Removed local image copy after successful deploy", "path", pth)
+            }
+        }
     }
     // Register collection in DB to get ID and mint link
     var mintLink string
@@ -667,6 +759,46 @@ func (a *Agent) handleWalletPrivacyQuery(msg *SocialMessage) error {
         Content:  fallback,
         Metadata: msg.Metadata,
     })
+}
+
+// handleHelp sends a short commands cheat-sheet via DM and
+// a brief confirmation in the current channel.
+func (a *Agent) handleHelp(msg *SocialMessage) error {
+	if msg.Platform != "discord" {
+		return nil
+	}
+
+	helpText := "Here’s a quick neobot cheat-sheet:\n\n" +
+		"**Deploy a new collection**\n" +
+		"- `@neobot-test deploy this image as NFT collection, name Neo Badge, symbol NEOB, price 0.01 SOL, supply 10000`\n" +
+		"- `@neobot-test can you set up a cheap community badge, 0.005 SOL, call it Dev Badge with symbol DEVBDG, use the image I attached`\n\n" +
+		"**Look up a collection id**\n" +
+		"- `@neobot-test what is the collection id for CATTO SCREAM?`\n\n" +
+		"**Mint from an existing collection**\n" +
+		"- `@neobot-test mint from collection id pt2i38sf`\n" +
+		"- `@neobot-test mint 3 from collection id pt2i38sf using CARV tokens`\n" +
+		"- `i want to mint this very cool nft, here’s the id pt2i38sf @neobot-test`\n\n" +
+		"I default to SOL unless you say CARV, and I usually assume quantity 1 if you don’t give a number."
+
+	dm := SocialMessage{
+		Platform: msg.Platform,
+		Type:     "Response",
+		Content:  helpText,
+		FromUser: msg.FromUser,
+		Metadata: map[string]interface{}{"dm_user_id": msg.FromUser},
+	}
+	if err := a.socialClient.SendMessage(a.ctx, dm); err != nil {
+		return err
+	}
+
+	confirm := "I’ve sent you a DM with a quick commands cheat-sheet you can use for deploy, lookup, and mint."
+	return a.socialClient.SendMessage(a.ctx, SocialMessage{
+		Platform: msg.Platform,
+		Type:     "Response",
+		Content:  confirm,
+		FromUser: msg.FromUser,
+		Metadata: msg.Metadata,
+	})
 }
 
 // handleCollectionLookup answers questions like
